@@ -27,6 +27,7 @@ from custom_components.vidaa_tv.const import (
     CONF_CERTFILE,
     CONF_DEVICE_ID,
     CONF_KEYFILE,
+    CONF_USE_SSL,
     CONF_HW_MAC,
     CONF_MAC,
     CONF_MAC_ETHERNET,
@@ -87,6 +88,44 @@ async def test_user_flow_certs_not_found(
     # Should show certs step when default certs don't exist
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "certs"
+
+
+async def test_user_flow_plain_mqtt_no_certs(
+    hass: HomeAssistant,
+    mock_config_flow_tv: MagicMock,
+    mock_certs_not_exist: MagicMock,
+    mock_setup_entry: AsyncMock,
+) -> None:
+    """A plain-MQTT TV pairs with SSL off even when no certificates exist."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+
+    # No default certs -> the certs step is shown instead of auto-connecting.
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_HOST: "192.168.1.100"},
+    )
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "certs"
+
+    # Turning SSL off must bypass the certificate check and reach pairing.
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_USE_SSL: False},
+    )
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "pair"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"pin": "1234"},
+    )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    # The entry records plain MQTT and stores no certificate paths.
+    assert result["data"][CONF_USE_SSL] is False
+    assert result["data"][CONF_CERTFILE] is None
+    assert result["data"][CONF_KEYFILE] is None
 
 
 async def test_user_flow_cannot_connect(
