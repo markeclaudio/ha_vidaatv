@@ -233,8 +233,8 @@ async def test_turn_on_wakes_the_tv_using_the_stored_hardware_mac(
         await entry.runtime_data.coordinator.async_turn_on()
         await hass.async_block_till_done()
 
-    mock_wake.assert_called_once()
-    assert mock_wake.call_args[0][0] == "a0:62:fb:66:77:ca"
+    woken = {call[0][0] for call in mock_wake.call_args_list}
+    assert "a0:62:fb:66:77:ca" in woken
 
 
 async def test_setup_backfills_the_hardware_mac_for_older_entries(

@@ -601,6 +601,14 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._device_id = entry_data.get(CONF_DEVICE_ID)
         # Entries paired before this option existed have no value stored.
         self._auth_mode = entry_data.get(CONF_AUTH_MODE) or DEFAULT_AUTH_MODE
+        # Carry over what the entry already knows, so reauth refreshes it
+        # rather than starting from nothing - the TV is often unreachable at
+        # exactly this moment, which is why reauth was triggered.
+        self._brand = entry_data.get(CONF_BRAND) or self._brand
+        self._model = entry_data.get(CONF_MODEL) or self._model
+        self._sw_version = entry_data.get(CONF_SW_VERSION) or self._sw_version
+        self._mac_ethernet = entry_data.get(CONF_MAC_ETHERNET)
+        self._mac_wifi = entry_data.get(CONF_MAC_WIFI)
         self._mac = generate_random_mac()  # Placeholder; resolved before pairing
         self._mac_resolved = False
         return await self.async_step_reauth_confirm()
@@ -699,10 +707,17 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                     # Handle reauth - update existing entry
                     if self.source == config_entries.SOURCE_REAUTH:
-                        return self.async_update_reload_and_abort(
-                            self._get_reauth_entry(),
-                            data=new_data,
-                        )
+                        # Merge, never replace. Reauth re-derives only what it
+                        # can see, and it usually runs against a TV that is
+                        # misbehaving or asleep - so a probe miss would
+                        # otherwise null out the stored MACs, model and
+                        # firmware, taking Wake-on-LAN down with them.
+                        entry = self._get_reauth_entry()
+                        merged = {
+                            **entry.data,
+                            **{k: v for k, v in new_data.items() if v is not None},
+                        }
+                        return self.async_update_reload_and_abort(entry, data=merged)
 
                     # Set unique ID to prevent duplicates
                     if self._device_id:
@@ -883,13 +898,16 @@ class VidaaTVOptionsFlow(config_entries.OptionsFlow):
         # (device_id). Deliberately not CONF_MAC: for entries paired before the
         # MAC is resolved from the TV's descriptor it still holds a random
         # dynamic-auth MAC, and nothing on the entry distinguishes the two.
-        current_wol_mac = self.config_entry.options.get(
-            "wol_mac",
-            # The MAC read from the TV's own descriptor, else the hardware MAC
-            # stored as device_id. Deliberately not CONF_MAC: for dynamic auth
-            # that may still be a random placeholder.
-            self.config_entry.data.get(CONF_HW_MAC)
-            or self.config_entry.data.get(CONF_DEVICE_ID, ""),
+        # The MAC read from the TV's own descriptor, else the hardware MAC
+        # stored as device_id. Deliberately not CONF_MAC: for dynamic auth that
+        # may still be a random placeholder. The trailing "" matters - these
+        # keys can be present but None, and a None default fails validation
+        # when the form is submitted without the field.
+        current_wol_mac = (
+            self.config_entry.options.get("wol_mac")
+            or self.config_entry.data.get(CONF_HW_MAC)
+            or self.config_entry.data.get(CONF_DEVICE_ID)
+            or ""
         )
         # The escape hatch for a TV whose reported protocol version does not
         # match what it actually accepts. Falls back to the paired-with scheme,

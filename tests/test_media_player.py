@@ -139,7 +139,7 @@ async def test_media_player_turn_off(
     coordinator = entry.runtime_data.coordinator
     await coordinator.async_turn_off()
 
-    mock_vidaa_tv.async_power_off.assert_called_once()
+    mock_vidaa_tv.async_send_key.assert_called_once_with("KEY_POWER")
 
 
 async def test_media_player_select_source(

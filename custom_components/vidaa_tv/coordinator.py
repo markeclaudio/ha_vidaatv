@@ -9,7 +9,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -22,6 +22,8 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_HOST,
     CONF_HW_MAC,
+    CONF_MAC_ETHERNET,
+    CONF_MAC_WIFI,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -64,6 +66,11 @@ class VidaaTVDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.entry = entry
         self._available = True
         self._device_info_fetched = False
+        # Older firmware never answers getdeviceinfo. Each attempt costs the
+        # full timeout, so give up after a few misses rather than paying it on
+        # every poll forever.
+        self._device_info_misses = 0
+        self._device_info_unsupported = False
         self._auth_failures = 0
         # Parsed device info (model, sw_version, name, ip, device_id) cached from
         # the TV's getdeviceinfo; entities build their DeviceInfo from this.
@@ -83,7 +90,7 @@ class VidaaTVDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         no after-the-fact device-registry surgery is required (that race is why
         model/firmware previously never showed up).
         """
-        if self._device_info_fetched:
+        if self._device_info_fetched or self._device_info_unsupported:
             return
 
         try:
@@ -93,10 +100,23 @@ class VidaaTVDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         if not info:
-            # Leave the flag unset so we retry on a later refresh (e.g. the TV
-            # was off during setup and comes online afterwards).
-            _LOGGER.debug("No device info returned from TV yet")
+            # Retry a few times - the TV may simply have been off during setup.
+            # But older firmware never answers getdeviceinfo at all, and each
+            # attempt costs the full timeout on every poll, so stop asking.
+            # A reconnect clears this, so a TV that gains the capability (or
+            # was merely asleep) is asked again.
+            self._device_info_misses += 1
+            if self._device_info_misses >= self._MAX_DEVICE_INFO_MISSES:
+                self._device_info_unsupported = True
+                _LOGGER.debug(
+                    "TV did not report device info %d times; not asking again "
+                    "until it reconnects", self._device_info_misses,
+                )
+            else:
+                _LOGGER.debug("No device info returned from TV yet")
             return
+
+        self._device_info_misses = 0
 
         self.device_data = {
             "model": info.get("model_name"),
@@ -127,6 +147,9 @@ class VidaaTVDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if updates:
                 device_registry.async_update_device(device_entry.id, **updates)
                 _LOGGER.debug("Refreshed existing device %s: %s", device_entry.id, updates)
+
+    # Consecutive empty getdeviceinfo replies before we stop asking.
+    _MAX_DEVICE_INFO_MISSES = 3
 
     # Refresh the access token when it has less than this until expiry.
     _TOKEN_REFRESH_THRESHOLD = 24 * 60 * 60  # 1 day
@@ -185,8 +208,11 @@ class VidaaTVDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     raise UpdateFailed("Failed to connect to TV")
                 _LOGGER.debug("Reconnect took %.2fs", time.monotonic() - start)
                 # A reconnect can mean the TV rebooted (e.g. a firmware update),
-                # so re-fetch device info to pick up a new firmware version.
+                # so re-fetch device info to pick up a new firmware version -
+                # including on a TV we had given up asking.
                 self._device_info_fetched = False
+                self._device_info_misses = 0
+                self._device_info_unsupported = False
 
             self._available = True
 
@@ -277,34 +303,48 @@ class VidaaTVDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     ) from err
             raise UpdateFailed(f"Error communicating with TV: {err}") from err
 
+    def _wol_targets(self) -> list[str]:
+        """Every MAC worth sending a magic packet to, most specific first.
+
+        A packet only wakes the interface the TV is actually connected on, and
+        the TV does not report which that is - so wake all of them rather than
+        guessing. An explicit wol_mac still leads, and a packet addressed to an
+        absent interface is simply ignored.
+        """
+        candidates = [
+            self.entry.options.get("wol_mac"),
+            self.entry.data.get(CONF_HW_MAC),
+            self.entry.data.get(CONF_MAC_ETHERNET),
+            self.entry.data.get(CONF_MAC_WIFI),
+            self.entry.data.get(CONF_DEVICE_ID),
+            self.device_data.get("device_id"),
+        ]
+
+        targets: list[str] = []
+        seen: set[str] = set()
+        for raw in candidates:
+            flat = (raw or "").replace(":", "").replace("-", "").lower()
+            if len(flat) != 12 or not all(c in "0123456789abcdef" for c in flat):
+                continue
+            if flat in seen:
+                continue
+            seen.add(flat)
+            targets.append(":".join(flat[i:i + 2] for i in range(0, 12, 2)))
+        return targets
+
     async def async_turn_on(self) -> None:
         """Turn TV on using WoL and power command."""
-        # Resolve the WoL target MAC: explicit wol_mac option wins, then the MAC
-        # read from the TV's own descriptor at setup, then the hardware MAC
-        # stored as device_id (config entry, or cached from getdeviceinfo once
-        # the TV has been seen online). CONF_HW_MAC matters for TVs that never
-        # answer getdeviceinfo - older firmware does not - which would otherwise
-        # leave nothing to wake. Normalize to bare hex so a colon/dash-formatted
-        # value still works.
-        raw_mac = (
-            self.entry.options.get("wol_mac")
-            or self.entry.data.get(CONF_HW_MAC)
-            or self.entry.data.get(CONF_DEVICE_ID)
-            or self.device_data.get("device_id")
-        )
-        normalized = (raw_mac or "").replace(":", "").replace("-", "").lower()
-        if len(normalized) == 12 and all(c in "0123456789abcdef" for c in normalized):
-            mac = ":".join(normalized[i:i+2] for i in range(0, 12, 2))
+        targets = self._wol_targets()
+        if targets:
             # Derive a /24 broadcast subnet only for a real IPv4 host.
-            host = self.entry.data.get(CONF_HOST, "")
-            subnet = _ipv4_broadcast_subnet(host)
-            _LOGGER.debug("Sending WoL to %s", mac)
-            await self.hass.async_add_executor_job(wake_tv, mac, subnet)
+            subnet = _ipv4_broadcast_subnet(self.entry.data.get(CONF_HOST, ""))
+            _LOGGER.debug("Sending WoL to %s", ", ".join(targets))
+            for mac in targets:
+                await self.hass.async_add_executor_job(wake_tv, mac, subnet)
         else:
             _LOGGER.warning(
-                "Skipping Wake-on-LAN: no valid MAC (got %r). Set a 'wol_mac' in the "
-                "integration options to enable wake-on-LAN.",
-                raw_mac,
+                "Skipping Wake-on-LAN: no valid MAC known for this TV. Set a "
+                "'wol_mac' in the integration options to enable wake-on-LAN."
             )
 
         # Also send power on command
@@ -313,41 +353,67 @@ class VidaaTVDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_turn_off(self) -> None:
         """Turn TV off."""
-        await self.tv.async_power_off()
+        # KEY_POWER is a toggle, so the library's power_off() reads the state
+        # first to avoid switching a sleeping TV back on. We already polled that
+        # state, so send the key directly and skip a round-trip the TV can take
+        # seconds to answer.
+        if self.data and self.data.get("is_on") is False:
+            _LOGGER.debug("TV is already off; not sending power off")
+            return
+
+        if self.data:
+            await self.tv.async_send_key("KEY_POWER")
+        else:
+            # No poll has succeeded yet, so let the library decide safely.
+            await self.tv.async_power_off()
         await self.async_request_refresh()
+
+    @staticmethod
+    def _check_sent(sent: Any, description: str) -> None:
+        """Turn a dropped command into a visible error.
+
+        pyvidaa returns False when it could not publish - typically because the
+        session is gone. Discarding that made Home Assistant report success for
+        a command that never left the process, which is what "the buttons do
+        nothing and nothing is logged" looks like from the outside.
+        """
+        if sent is False:
+            raise HomeAssistantError(
+                f"Could not send {description} to the TV - it is not reachable"
+            )
 
     async def async_volume_up(self) -> None:
         """Increase volume."""
-        await self.tv.async_volume_up()
+        self._check_sent(await self.tv.async_volume_up(), "volume up")
         await self.async_request_refresh()
 
     async def async_volume_down(self) -> None:
         """Decrease volume."""
-        await self.tv.async_volume_down()
+        self._check_sent(await self.tv.async_volume_down(), "volume down")
         await self.async_request_refresh()
 
     async def async_mute(self) -> None:
         """Toggle mute."""
-        await self.tv.async_mute()
+        self._check_sent(await self.tv.async_mute(), "mute")
         await self.async_request_refresh()
 
     async def async_set_volume(self, volume: int) -> None:
         """Set volume level."""
-        await self.tv.async_set_volume(volume)
+        self._check_sent(await self.tv.async_set_volume(volume), "volume")
         await self.async_request_refresh()
 
     async def async_select_source(self, source: str) -> None:
         """Select input source."""
-        await self.tv.async_set_source(source)
+        self._check_sent(await self.tv.async_set_source(source), f"source {source}")
         await self.async_request_refresh()
 
     async def async_send_key(self, key: str) -> None:
         """Send remote key."""
-        await self.tv.async_send_key(key)
+        self._check_sent(await self.tv.async_send_key(key), key)
 
     async def async_launch_app(self, app_name: str) -> None:
         """Launch app."""
-        await self.tv.async_launch_app(app_name)
+        self._check_sent(await self.tv.async_launch_app(app_name), f"app {app_name}")
         await self.async_request_refresh()
 
     async def async_get_apps(self) -> list[dict] | None:

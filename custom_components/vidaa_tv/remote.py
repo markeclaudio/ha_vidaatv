@@ -130,9 +130,15 @@ class VidaaTVRemote(CoordinatorEntity[VidaaTVDataUpdateCoordinator], RemoteEntit
 
     @property
     def is_on(self) -> bool | None:
-        """Return if TV is on."""
-        if not self.coordinator.data:
-            return None
+        """Return if TV is on.
+
+        Mirrors the media player: an unreachable TV is off, not "whatever it was
+        doing last". Without the coordinator.available guard the two entities
+        could disagree, since coordinator.data keeps its last value on a failed
+        update.
+        """
+        if not self.coordinator.data or not self.coordinator.available:
+            return False
         return self.coordinator.data.get("is_on", False)
 
     @property

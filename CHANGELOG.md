@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.1.2]
 
+### Fixed (second round)
+
+- **The TV showed as On for about two minutes after being switched off, and
+  could not be controlled in the meantime.** The library could not tell "the TV
+  stopped answering" from "its state has not changed", so Home Assistant kept
+  reporting the last thing the TV was doing until the connection finally timed
+  out. It now reports Off on the first poll after the TV goes away — and
+  usually sooner, because the TV's own standby announcement is now listened
+  for, which also catches the set being switched off with its own remote.
+- **Commands that never reached the TV reported success.** Pressing a button on
+  an unreachable TV did nothing, silently, with nothing in the log — which is
+  what "I can no longer control it" looked like. Such commands now raise a
+  visible error.
+- Each poll no longer wastes several seconds: an update against an idle TV
+  drops from ~9s to well under a second, because neither the state request nor
+  the device-info request waits out a timeout the TV was never going to answer.
+- Wake-on-LAN now targets every MAC the TV reports, not just the Ethernet one —
+  so a TV on Wi-Fi wakes without hand-setting **wol_mac** first.
+- Turning the TV off no longer re-reads its state first; the integration
+  already knows whether it is on.
+- Re-authenticating no longer wipes the stored MAC addresses, model and
+  firmware — which had been silently disabling Wake-on-LAN.
+- The remote entity could report On while the media player reported Off.
+- The **wol_mac** option form could fail to submit on entries with no stored
+  MAC — the very case where it is needed.
+
 ### Added
 
 - The TV's Ethernet and Wi-Fi MAC addresses are now shown on its device page,

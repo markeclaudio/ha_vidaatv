@@ -131,6 +131,14 @@ def mock_vidaa_tv() -> Generator[MagicMock, None, None]:
     )
     mock_instance.async_refresh_token = AsyncMock(return_value=True)
 
+    # Commands return True when published; False now means 'not sent'.
+    for _command in (
+        "async_send_key", "async_set_source", "async_launch_app",
+        "async_set_volume", "async_volume_up", "async_volume_down",
+        "async_mute", "async_power_on", "async_power_off",
+    ):
+        setattr(mock_instance, _command, AsyncMock(return_value=True))
+
     # Device info methods
     mock_instance.async_get_device_info = AsyncMock(return_value=MOCK_DEVICE_INFO)
     mock_instance.async_get_tv_info = AsyncMock(
@@ -142,16 +150,9 @@ def mock_vidaa_tv() -> Generator[MagicMock, None, None]:
     mock_instance.async_get_volume = AsyncMock(return_value=50)
     mock_instance.is_muted = False
 
-    # Control methods
-    mock_instance.async_power_on = AsyncMock()
-    mock_instance.async_power_off = AsyncMock()
-    mock_instance.async_volume_up = AsyncMock()
-    mock_instance.async_volume_down = AsyncMock()
-    mock_instance.async_mute = AsyncMock()
-    mock_instance.async_set_volume = AsyncMock()
-    mock_instance.async_set_source = AsyncMock()
-    mock_instance.async_send_key = AsyncMock()
-    mock_instance.async_launch_app = AsyncMock()
+    # Control methods are stubbed above with return_value=True; a bare
+    # AsyncMock() here would return a MagicMock, which reads as "sent" only by
+    # accident and would hide a regression in the dropped-command check.
 
     # App/source methods
     mock_instance.async_get_apps = AsyncMock(

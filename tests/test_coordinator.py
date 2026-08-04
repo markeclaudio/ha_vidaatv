@@ -12,7 +12,13 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.vidaa_tv.coordinator import VidaaTVDataUpdateCoordinator
-from custom_components.vidaa_tv.const import DOMAIN, SCAN_INTERVAL
+from custom_components.vidaa_tv.const import (
+    CONF_HW_MAC,
+    CONF_MAC_ETHERNET,
+    CONF_MAC_WIFI,
+    DOMAIN,
+    SCAN_INTERVAL,
+)
 
 from .conftest import MOCK_CONFIG_ENTRY_DATA, MOCK_DEVICE_INFO, MOCK_TV_STATE, create_mock_config_entry
 
@@ -229,7 +235,10 @@ async def test_coordinator_turn_off(
     coordinator = entry.runtime_data.coordinator
     await coordinator.async_turn_off()
 
-    mock_vidaa_tv.async_power_off.assert_called()
+    # We already know the TV is on from the poll, so send the key directly
+    # instead of paying for power_off()'s state round-trip.
+    mock_vidaa_tv.async_send_key.assert_called_once_with("KEY_POWER")
+    mock_vidaa_tv.async_power_off.assert_not_called()
 
 
 async def test_coordinator_volume_controls(
@@ -283,3 +292,176 @@ async def test_coordinator_auth_failure_triggers_reauth(
 
     # Third failure should be ConfigEntryAuthFailed
     assert coordinator._auth_failures >= 3
+
+
+# --- a TV that stops answering must read as OFF ----------------------------
+
+
+async def test_silent_tv_reports_off_on_the_very_next_poll(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """Regression: Home Assistant showed the TV as ON for ~2 minutes after it
+    was switched off.
+
+    pyvidaa's get_state() used to return the last known state when the TV
+    stopped answering, so the coordinator could not tell "gone" from
+    "unchanged" and kept reporting is_on=True until the MQTT keepalive expired
+    and a reconnect finally failed. get_state() now returns None instead.
+    """
+    entry = create_mock_config_entry(hass)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.vidaa_tv.AsyncVidaaTV", return_value=mock_vidaa_tv
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    coordinator = entry.runtime_data.coordinator
+    assert coordinator.data["is_on"] is True
+
+    # The TV is switched off: still "connected" as far as the socket knows,
+    # but it answers nothing.
+    mock_vidaa_tv.async_get_state = AsyncMock(return_value=None)
+    await coordinator.async_refresh()
+
+    assert coordinator.data["is_on"] is False
+
+
+async def test_turn_off_is_skipped_when_the_tv_is_already_off(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """KEY_POWER toggles, so sending it to a sleeping TV would wake it."""
+    entry = create_mock_config_entry(hass)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.vidaa_tv.AsyncVidaaTV", return_value=mock_vidaa_tv
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    coordinator = entry.runtime_data.coordinator
+    mock_vidaa_tv.async_get_state = AsyncMock(return_value=None)
+    await coordinator.async_refresh()
+    mock_vidaa_tv.async_send_key.reset_mock()
+
+    await coordinator.async_turn_off()
+
+    mock_vidaa_tv.async_send_key.assert_not_called()
+
+
+async def test_device_info_is_not_requested_forever(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """Older firmware never answers getdeviceinfo, and each try costs a full
+    timeout on every poll."""
+    mock_vidaa_tv.async_get_device_info = AsyncMock(return_value=None)
+
+    entry = create_mock_config_entry(hass)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.vidaa_tv.AsyncVidaaTV", return_value=mock_vidaa_tv
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    coordinator = entry.runtime_data.coordinator
+    for _ in range(6):
+        await coordinator.async_refresh()
+
+    assert coordinator._device_info_unsupported is True
+    assert mock_vidaa_tv.async_get_device_info.await_count <= (
+        coordinator._MAX_DEVICE_INFO_MISSES
+    )
+
+
+async def test_a_reconnect_re_asks_a_tv_we_had_given_up_on(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """A rebooted TV may gain the capability (or was merely asleep)."""
+    mock_vidaa_tv.async_get_device_info = AsyncMock(return_value=None)
+
+    entry = create_mock_config_entry(hass)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.vidaa_tv.AsyncVidaaTV", return_value=mock_vidaa_tv
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    coordinator = entry.runtime_data.coordinator
+    for _ in range(6):
+        await coordinator.async_refresh()
+    assert coordinator._device_info_unsupported is True
+
+    # The TV drops and comes back.
+    mock_vidaa_tv.is_connected = False
+    await coordinator.async_refresh()
+
+    assert coordinator._device_info_unsupported is False
+
+
+async def test_wake_on_lan_targets_every_known_interface(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """A magic packet only wakes the interface the TV is actually on, and the
+    TV does not say which - so wake both rather than guessing.
+
+    The reporter's TV needed the Wi-Fi MAC; we defaulted to Ethernet, so
+    power-on silently did nothing until he set wol_mac by hand.
+    """
+    data = dict(MOCK_CONFIG_ENTRY_DATA)
+    data[CONF_HW_MAC] = "a0:62:fb:66:77:ca"
+    data[CONF_MAC_ETHERNET] = "a0:62:fb:66:77:ca"
+    data[CONF_MAC_WIFI] = "f0:35:75:29:5a:e0"
+
+    entry = create_mock_config_entry(hass, data=data)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.vidaa_tv.AsyncVidaaTV", return_value=mock_vidaa_tv
+    ), patch("custom_components.vidaa_tv.coordinator.wake_tv") as mock_wake:
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        await entry.runtime_data.coordinator.async_turn_on()
+        await hass.async_block_till_done()
+
+    woken = [call[0][0] for call in mock_wake.call_args_list]
+    assert "a0:62:fb:66:77:ca" in woken
+    assert "f0:35:75:29:5a:e0" in woken
+    # The Ethernet MAC is listed twice on the entry; wake it once.
+    assert len(woken) == len(set(woken))
+
+
+async def test_a_dropped_command_surfaces_as_an_error(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """Regression: pyvidaa returns False when it cannot publish, and the
+    coordinator discarded it - so Home Assistant reported success for a command
+    that never left the process. That is what "the buttons do nothing, and
+    nothing is logged" looked like."""
+    from homeassistant.exceptions import HomeAssistantError
+
+    entry = create_mock_config_entry(hass)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.vidaa_tv.AsyncVidaaTV", return_value=mock_vidaa_tv
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    coordinator = entry.runtime_data.coordinator
+    mock_vidaa_tv.async_send_key = AsyncMock(return_value=False)
+
+    with pytest.raises(HomeAssistantError):
+        await coordinator.async_send_key("KEY_HOME")
