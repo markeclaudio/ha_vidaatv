@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import voluptuous as vol
@@ -25,6 +25,7 @@ from .const import (
     CONF_AUTH_MODE,
     CONF_BRAND,
     CONF_CERTFILE,
+    CONF_HW_MAC,
     CONF_KEYFILE,
     DEFAULT_AUTH_MODE,
     DEFAULT_PORT,
@@ -41,6 +42,7 @@ _LOGGER = logging.getLogger(__name__)
 # Import from PyPI package (pyvidaa)
 from pyvidaa import AsyncVidaaTV, auth_mode_kwargs
 from pyvidaa.config import get_storage
+from pyvidaa.discovery import probe_ip
 
 
 @dataclass
@@ -49,6 +51,9 @@ class VidaaTVRuntimeData:
 
     coordinator: VidaaTVDataUpdateCoordinator
     tv: AsyncVidaaTV
+    # The options this setup was built with, so the update listener can tell a
+    # real options change from an entry.data write it should ignore.
+    options_snapshot: dict[str, Any] = field(default_factory=dict)
 
 
 type VidaaTVConfigEntry = ConfigEntry[VidaaTVRuntimeData]
@@ -110,7 +115,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: VidaaTVConfigEntry) -> b
     await coordinator.async_refresh()
 
     # Store runtime data using the modern pattern
-    entry.runtime_data = VidaaTVRuntimeData(coordinator=coordinator, tv=tv)
+    entry.runtime_data = VidaaTVRuntimeData(
+        coordinator=coordinator, tv=tv, options_snapshot=dict(entry.options)
+    )
 
     # Set up platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -118,7 +125,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: VidaaTVConfigEntry) -> b
     # Register update listener for options
     entry.async_on_unload(entry.add_update_listener(async_update_options))
 
+    # Backfill the TV's hardware MAC for entries paired before it was stored.
+    # Without it, Wake-on-LAN has nothing to aim at on TVs that never answer
+    # getdeviceinfo (older firmware does not), so the TV can be turned off from
+    # Home Assistant but not back on. Backgrounded: it must never delay setup,
+    # and it simply does nothing while the TV is unreachable.
+    if not entry.data.get(CONF_HW_MAC):
+        entry.async_create_background_task(
+            hass, _async_backfill_hw_mac(hass, entry), "vidaa_tv_hw_mac"
+        )
+
     return True
+
+
+async def _async_backfill_hw_mac(hass: HomeAssistant, entry: VidaaTVConfigEntry) -> None:
+    """Read the TV's real MAC from its UPnP descriptor and store it."""
+    try:
+        device = await hass.async_add_executor_job(probe_ip, entry.data[CONF_HOST])
+    except Exception as err:  # noqa: BLE001 - best effort, retried next reload
+        _LOGGER.debug("Could not probe %s for its MAC: %s", entry.data[CONF_HOST], err)
+        return
+
+    if not device or not device.mac:
+        return
+
+    _LOGGER.debug("Storing hardware MAC %s for Wake-on-LAN", device.mac)
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_HW_MAC: device.mac}
+    )
 
 
 async def _async_setup_services(hass: HomeAssistant) -> None:
@@ -221,5 +255,16 @@ async def async_remove_config_entry_device(
 
 
 async def async_update_options(hass: HomeAssistant, entry: VidaaTVConfigEntry) -> None:
-    """Handle options update."""
+    """Reload when the options change.
+
+    This listener fires for ANY entry update, including writes to entry.data
+    such as the hardware-MAC backfill. Reloading for those would tear the
+    integration down and rebuild it mid-setup, so only a genuine options change
+    counts.
+    """
+    runtime = entry.runtime_data
+    if runtime is not None and entry.options == runtime.options_snapshot:
+        return
+    if runtime is not None:
+        runtime.options_snapshot = dict(entry.options)
     await hass.config_entries.async_reload(entry.entry_id)

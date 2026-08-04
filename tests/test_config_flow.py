@@ -742,18 +742,22 @@ async def test_certs_step_offers_an_auth_mode(
     assert CONF_AUTH_MODE in result["data_schema"].schema
 
 
-async def test_static_auth_mode_skips_the_mac_probe(hass: HomeAssistant) -> None:
-    """Static credentials derive nothing from the MAC, so don't pay for a probe.
+async def test_static_auth_still_resolves_the_mac_for_wake_on_lan(
+    hass: HomeAssistant,
+) -> None:
+    """Static credentials derive nothing from the MAC, but WoL needs it.
 
-    The probe tries both UPnP ports with a timeout each, which is seconds of
-    config-flow latency against a slow or half-awake TV.
+    Regression: skipping the probe here left the entry with only a random
+    placeholder, so the TV could be turned off from Home Assistant and never
+    turned back on - Wake-on-LAN had nothing valid to aim at.
     """
     from custom_components.vidaa_tv.config_flow import validate_connection
 
+    probe_device = MagicMock(brand="his", mac="a0:62:fb:66:77:ca")
     with patch(
         "custom_components.vidaa_tv.config_flow.AsyncVidaaTV", autospec=True
     ) as mock_class, patch(
-        "custom_components.vidaa_tv.config_flow.probe_ip"
+        "custom_components.vidaa_tv.config_flow.probe_ip", return_value=probe_device
     ) as mock_probe:
         tv = mock_class.return_value
         tv.async_connect = AsyncMock(return_value=True)
@@ -766,9 +770,36 @@ async def test_static_auth_mode_skips_the_mac_probe(hass: HomeAssistant) -> None
             hass, "192.168.1.100", DEFAULT_PORT, auth_mode=AUTH_MODE_STATIC
         )
 
-    mock_probe.assert_not_called()
+    mock_probe.assert_called_once()
     assert mock_class.call_args.kwargs["use_dynamic_auth"] is False
     assert result["auth_mode"] == AUTH_MODE_STATIC
+    assert result["mac"] == "a0:62:fb:66:77:ca"
+
+
+async def test_static_auth_reports_no_mac_rather_than_a_random_one(
+    hass: HomeAssistant,
+) -> None:
+    """A random MAC is worse than none: WoL would silently wake nothing."""
+    from custom_components.vidaa_tv.config_flow import validate_connection
+
+    with patch(
+        "custom_components.vidaa_tv.config_flow.AsyncVidaaTV", autospec=True
+    ) as mock_class, patch(
+        "custom_components.vidaa_tv.config_flow.probe_ip", return_value=None
+    ):
+        tv = mock_class.return_value
+        tv.async_connect = AsyncMock(return_value=True)
+        tv.async_disconnect = AsyncMock()
+        tv.async_get_device_info = AsyncMock(return_value=MOCK_DEVICE_INFO)
+        tv.async_get_tv_info = AsyncMock(return_value=None)
+        tv.auth_mode = AUTH_MODE_STATIC
+
+        result = await validate_connection(
+            hass, "192.168.1.100", DEFAULT_PORT, auth_mode=AUTH_MODE_STATIC
+        )
+
+    assert result["mac"] is None
+    assert mock_class.call_args.kwargs["mac_address"] is None
 
 
 async def test_auto_auth_mode_still_probes_and_uses_dynamic(

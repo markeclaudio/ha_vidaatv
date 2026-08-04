@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 (Library/protocol changes are tracked separately in the [`pyvidaa`](https://github.com/warrenrees/pyvidaa) repository.)
 
+## [2.1.2]
+
+### Fixed
+
+- **The TV could be turned off from Home Assistant but not back on.** Turning a
+  TV on needs Wake-on-LAN — once it is off its MQTT service is gone, so no
+  command can reach it — and Wake-on-LAN had no MAC to aim at on TVs that never
+  report one via `getdeviceinfo`, which older firmware does not. The TV's real
+  MAC is now read from its UPnP descriptor during setup and stored. Existing
+  entries backfill it automatically in the background on the next restart; no
+  re-pairing needed. If your TV is on Wi-Fi and still will not wake, set
+  **wol_mac** in the integration options to its Wi-Fi MAC (Wake-on-LAN over
+  Wi-Fi also has to be supported and enabled on the TV).
+- Older TVs no longer retry a pointless token refresh on every poll. They issue
+  no token at all, so the log filled with "No refresh token available".
+
+### Changed
+
+- Requires `pyvidaa` 2.2.2, which identifies itself to the TV as `pyvidaa`
+  rather than `HomeAssistant`. That avoids fighting a Mosquitto-bridge-based
+  integration for the same connection. Already-paired TVs keep working as they
+  are; only newly-paired ones use the new identifier.
+
 ## [2.1.1]
 
 ### Fixed

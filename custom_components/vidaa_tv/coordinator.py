@@ -15,7 +15,14 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from pyvidaa import APPS
 from pyvidaa.wol import wake_tv
-from .const import DOMAIN, SCAN_INTERVAL, STATE_FAKE_SLEEP, CONF_DEVICE_ID, CONF_HOST
+from .const import (
+    DOMAIN,
+    SCAN_INTERVAL,
+    STATE_FAKE_SLEEP,
+    CONF_DEVICE_ID,
+    CONF_HOST,
+    CONF_HW_MAC,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -135,6 +142,11 @@ class VidaaTVDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             status = await self.tv.async_token_status()
             if not status.get("has_token") or status.get("needs_reauth"):
+                return
+            if status.get("tokenless"):
+                # Older firmware issues no token at all - it authorizes the
+                # client_id when the PIN is entered. There is nothing to renew,
+                # and its zero expiry would otherwise look permanently overdue.
                 return
             near_expiry = (
                 status.get("access_valid")
@@ -267,12 +279,16 @@ class VidaaTVDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_turn_on(self) -> None:
         """Turn TV on using WoL and power command."""
-        # Resolve the WoL target MAC: explicit wol_mac option wins, else the TV's
-        # hardware MAC stored as device_id (config entry, or the value cached from
-        # getdeviceinfo once the TV has been seen online). Normalize to bare hex so
-        # a colon/dash-formatted value still works.
+        # Resolve the WoL target MAC: explicit wol_mac option wins, then the MAC
+        # read from the TV's own descriptor at setup, then the hardware MAC
+        # stored as device_id (config entry, or cached from getdeviceinfo once
+        # the TV has been seen online). CONF_HW_MAC matters for TVs that never
+        # answer getdeviceinfo - older firmware does not - which would otherwise
+        # leave nothing to wake. Normalize to bare hex so a colon/dash-formatted
+        # value still works.
         raw_mac = (
             self.entry.options.get("wol_mac")
+            or self.entry.data.get(CONF_HW_MAC)
             or self.entry.data.get(CONF_DEVICE_ID)
             or self.device_data.get("device_id")
         )

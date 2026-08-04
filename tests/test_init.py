@@ -18,6 +18,8 @@ from custom_components.vidaa_tv.const import (
     AUTH_MODE_DYNAMIC,
     AUTH_MODE_STATIC,
     CONF_AUTH_MODE,
+    CONF_DEVICE_ID,
+    CONF_HW_MAC,
     DOMAIN,
 )
 
@@ -199,3 +201,98 @@ async def test_setup_entry_uses_the_stored_auth_mode(
         await hass.async_block_till_done()
 
     assert mock_class.call_args.kwargs["use_dynamic_auth"] is expect_dynamic
+
+
+# --- Wake-on-LAN target ----------------------------------------------------
+
+
+async def test_turn_on_wakes_the_tv_using_the_stored_hardware_mac(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """Regression: the TV could be turned off but never back on.
+
+    Older firmware never answers getdeviceinfo, so device_id stays empty and
+    there was no MAC to wake - power-on silently did nothing (the TV is off, so
+    the MQTT command cannot reach it either).
+    """
+    data = dict(MOCK_CONFIG_ENTRY_DATA)
+    data.pop(CONF_DEVICE_ID, None)
+    data[CONF_HW_MAC] = "a0:62:fb:66:77:ca"
+
+    entry = create_mock_config_entry(hass, data=data)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.vidaa_tv.AsyncVidaaTV", return_value=mock_vidaa_tv
+    ), patch("custom_components.vidaa_tv.coordinator.wake_tv") as mock_wake:
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        await entry.runtime_data.coordinator.async_turn_on()
+        await hass.async_block_till_done()
+
+    mock_wake.assert_called_once()
+    assert mock_wake.call_args[0][0] == "a0:62:fb:66:77:ca"
+
+
+async def test_setup_backfills_the_hardware_mac_for_older_entries(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+    mock_hw_mac_probe: MagicMock,
+) -> None:
+    """Entries paired before the MAC was stored must self-heal, not need re-pairing."""
+    data = dict(MOCK_CONFIG_ENTRY_DATA)
+    data.pop(CONF_HW_MAC, None)
+
+    entry = create_mock_config_entry(hass, data=data)
+    entry.add_to_hass(hass)
+
+    with patch("custom_components.vidaa_tv.AsyncVidaaTV", return_value=mock_vidaa_tv):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    mock_hw_mac_probe.assert_called_once()
+    assert entry.data[CONF_HW_MAC] == "00:11:22:33:44:55"
+
+
+async def test_backfill_does_not_reload_the_integration(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """Writing to entry.data fires the update listener; it must not reload.
+
+    A reload mid-setup would tear down the client that was just built.
+    """
+    data = dict(MOCK_CONFIG_ENTRY_DATA)
+    data.pop(CONF_HW_MAC, None)
+
+    entry = create_mock_config_entry(hass, data=data)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.vidaa_tv.AsyncVidaaTV", return_value=mock_vidaa_tv
+    ), patch.object(
+        hass.config_entries, "async_reload", wraps=hass.config_entries.async_reload
+    ) as mock_reload:
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    mock_reload.assert_not_called()
+
+
+async def test_changing_options_still_reloads(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """The listener must keep doing its actual job."""
+    entry = create_mock_config_entry(hass)
+    entry.add_to_hass(hass)
+
+    with patch("custom_components.vidaa_tv.AsyncVidaaTV", return_value=mock_vidaa_tv):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        hass.config_entries.async_update_entry(entry, options={"scan_interval": 60})
+        await hass.async_block_till_done()
+
+    assert entry.runtime_data.options_snapshot == {"scan_interval": 60}

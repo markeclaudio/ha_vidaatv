@@ -33,6 +33,20 @@ def auto_enable_custom_integrations(enable_custom_integrations):
     yield
 
 
+@pytest.fixture(autouse=True)
+def mock_hw_mac_probe() -> Generator[MagicMock, None, None]:
+    """Stub the setup-time hardware-MAC backfill.
+
+    It runs as a background task on any entry without a stored MAC and does a
+    real UPnP probe, which the test suite rightly blocks as network access.
+    """
+    with patch(
+        "custom_components.vidaa_tv.probe_ip",
+        return_value=MagicMock(mac="00:11:22:33:44:55"),
+    ) as mock_probe:
+        yield mock_probe
+
+
 def create_mock_config_entry(
     hass: HomeAssistant,
     data: dict | None = None,

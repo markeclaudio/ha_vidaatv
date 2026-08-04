@@ -34,6 +34,7 @@ from .const import (
     DOMAIN,
     CONF_AUTH_MODE,
     CONF_DEVICE_ID,
+    CONF_HW_MAC,
     CONF_MAC,
     CONF_MODEL,
     CONF_BRAND,
@@ -154,15 +155,12 @@ async def validate_connection(
     auth_mode: str = DEFAULT_AUTH_MODE,
 ) -> dict[str, Any]:
     """Validate we can connect to the TV."""
-    # Dynamic-auth credentials are derived from the MAC; the TV recomputes the
-    # same hash from its own real MAC, so a random one is never accepted past
-    # the initial CONNACK. Resolve the TV's real MAC via a UPnP probe before
-    # falling back to a random one (which will just fail).
-    #
-    # Static auth derives nothing from the MAC, so skip the probe there - it
-    # costs seconds against a slow TV and its result is never used.
+    # Resolve the TV's real MAC. Dynamic-auth credentials are a hash of it and
+    # the TV recomputes the same hash from its own, so a random one is never
+    # accepted past the initial CONNACK. Static auth derives nothing from it,
+    # but Wake-on-LAN still needs it to turn the TV back on, so probe either way.
     mac = mac_address
-    if not mac and auth_mode != AUTH_MODE_STATIC:
+    if not mac:
         try:
             device = await hass.async_add_executor_job(probe_ip, host)
             if device and device.mac:
@@ -170,8 +168,10 @@ async def validate_connection(
         except Exception as err:  # noqa: BLE001 - best effort, falls back below
             _LOGGER.debug("Could not probe MAC for %s: %s", host, err)
     mac_resolved = mac is not None
-    if auth_mode != AUTH_MODE_STATIC:
-        mac = mac or generate_random_mac()
+    if not mac_resolved and auth_mode != AUTH_MODE_STATIC:
+        # Dynamic auth cannot build a client_id without one. A random MAC will
+        # be rejected, but that failure is clearer than refusing to connect.
+        mac = generate_random_mac()
 
     tv = AsyncVidaaTV(
         host=host,
@@ -625,6 +625,9 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_NAME: self._name,
                         CONF_DEVICE_ID: self._device_id,
                         CONF_MAC: self._mac,  # New MAC used for auth
+                        # Only when it really came from the TV: Wake-on-LAN
+                        # aimed at a random placeholder wakes nothing.
+                        CONF_HW_MAC: self._mac if self._mac_resolved else None,
                         CONF_MODEL: self._model,
                         CONF_BRAND: self._brand or "his",
                         CONF_SW_VERSION: self._sw_version,
@@ -692,10 +695,9 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # particular matters: dynamic-auth credentials are a hash of it,
             # and the TV recomputes that hash with its own real MAC, so a
             # random placeholder is silently dropped right after CONNACK.
-            # Static auth derives nothing from the MAC, so only probe when the
-            # brand is still unknown (SSDP may not have supplied it).
-            needs_mac = self._auth_mode != AUTH_MODE_STATIC and not self._mac_resolved
-            if (not self._brand or needs_mac) and self._host:
+            # Static auth derives nothing from the MAC, but Wake-on-LAN needs
+            # the TV's real one to turn it back on, so resolve it either way.
+            if (not self._brand or not self._mac_resolved) and self._host:
                 try:
                     device = await self.hass.async_add_executor_job(
                         probe_ip, self._host
@@ -821,7 +823,12 @@ class VidaaTVOptionsFlow(config_entries.OptionsFlow):
         # MAC is resolved from the TV's descriptor it still holds a random
         # dynamic-auth MAC, and nothing on the entry distinguishes the two.
         current_wol_mac = self.config_entry.options.get(
-            "wol_mac", self.config_entry.data.get(CONF_DEVICE_ID, "")
+            "wol_mac",
+            # The MAC read from the TV's own descriptor, else the hardware MAC
+            # stored as device_id. Deliberately not CONF_MAC: for dynamic auth
+            # that may still be a random placeholder.
+            self.config_entry.data.get(CONF_HW_MAC)
+            or self.config_entry.data.get(CONF_DEVICE_ID, ""),
         )
         # The escape hatch for a TV whose reported protocol version does not
         # match what it actually accepts. Falls back to the paired-with scheme,

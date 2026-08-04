@@ -8,6 +8,10 @@ DOMAIN: Final = "vidaa_tv"
 CONF_HOST: Final = "host"
 CONF_PORT: Final = "port"
 CONF_MAC: Final = "mac"
+# The TV's real hardware MAC, only ever set from the TV's own descriptor.
+# Distinct from CONF_MAC, which for dynamic auth may hold a random placeholder
+# used to build a client_id - sending Wake-on-LAN to that would do nothing.
+CONF_HW_MAC: Final = "hw_mac"
 CONF_NAME: Final = "name"
 CONF_DEVICE_ID: Final = "device_id"
 CONF_MODEL: Final = "model"
