@@ -177,6 +177,10 @@ def mock_config_flow_tv() -> Generator[MagicMock, None, None]:
     ) as mock_class, patch(
         "custom_components.vidaa_tv.config_flow.probe_ip",
         return_value=probe_device,
+    ), patch(
+        # The real delete_token reads and rewrites ./tokens.json, so an
+        # unpatched pairing test would clobber a developer's live token.
+        "custom_components.vidaa_tv.config_flow.delete_token"
     ):
         mock_instance = mock_class.return_value
 

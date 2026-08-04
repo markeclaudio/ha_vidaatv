@@ -15,12 +15,15 @@ from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
 from custom_components.vidaa_tv.config_flow import (
     CannotConnect,
     VidaaTVConfigFlow,
+    mac_from_descriptor,
+    parse_model_description,
 )
 from custom_components.vidaa_tv.const import (
     CONF_BRAND,
     CONF_CERTFILE,
     CONF_DEVICE_ID,
     CONF_KEYFILE,
+    CONF_MAC,
     DEFAULT_PORT,
     DOMAIN,
 )
@@ -477,6 +480,221 @@ async def test_ssdp_discovery_extracts_host_from_url(
     # Should proceed to pair step
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "pair"
+
+
+@pytest.mark.parametrize(
+    ("tv_info", "device_info", "expected_device_id"),
+    [
+        # deviceid from get_tv_info wins when present.
+        ({"deviceid": "aabbccddeeff"}, MOCK_DEVICE_INFO, "aabbccddeeff"),
+        # get_tv_info returns Optional[dict] - None must not raise. It used to
+        # AttributeError here, masked by the broad except as "cannot_connect".
+        (None, MOCK_DEVICE_INFO, "001122334455"),  # falls back to network_type
+        ({}, MOCK_DEVICE_INFO, "001122334455"),
+        # Nothing identifying: device_id stays None so the entities fall back
+        # to entry_id. It must NOT become the host IP, which would land in the
+        # entry unique_id and churn whenever DHCP hands out a new address.
+        (None, {"tv_name": "TV"}, None),
+    ],
+)
+async def test_validate_connection_device_id_resolution(
+    hass: HomeAssistant,
+    tv_info: dict | None,
+    device_info: dict,
+    expected_device_id: str | None,
+) -> None:
+    """device_id resolution tolerates a missing tv_info and never uses the IP."""
+    from custom_components.vidaa_tv.config_flow import validate_connection
+
+    probe_device = MagicMock(brand="his", mac="00:11:22:33:44:55")
+    with patch(
+        "custom_components.vidaa_tv.config_flow.AsyncVidaaTV", autospec=True
+    ) as mock_class, patch(
+        "custom_components.vidaa_tv.config_flow.probe_ip", return_value=probe_device
+    ):
+        tv = mock_class.return_value
+        tv.async_connect = AsyncMock(return_value=True)
+        tv.async_disconnect = AsyncMock()
+        tv.async_get_device_info = AsyncMock(return_value=device_info)
+        tv.async_get_tv_info = AsyncMock(return_value=tv_info)
+
+        result = await validate_connection(hass, "192.168.1.100", DEFAULT_PORT)
+
+    assert result["device_id"] == expected_device_id
+    assert result["device_id"] != "192.168.1.100"
+    # The resolved MAC is returned so the flow can skip a second probe.
+    assert result["mac"] == "00:11:22:33:44:55"
+
+
+async def test_validate_connection_reports_no_mac_when_probe_fails(
+    hass: HomeAssistant,
+) -> None:
+    """A random fallback MAC must not be reported as the TV's real MAC."""
+    from custom_components.vidaa_tv.config_flow import validate_connection
+
+    with patch(
+        "custom_components.vidaa_tv.config_flow.AsyncVidaaTV", autospec=True
+    ) as mock_class, patch(
+        "custom_components.vidaa_tv.config_flow.probe_ip", return_value=None
+    ):
+        tv = mock_class.return_value
+        tv.async_connect = AsyncMock(return_value=True)
+        tv.async_disconnect = AsyncMock()
+        tv.async_get_device_info = AsyncMock(return_value=MOCK_DEVICE_INFO)
+        tv.async_get_tv_info = AsyncMock(return_value=None)
+
+        result = await validate_connection(hass, "192.168.1.100", DEFAULT_PORT)
+
+    assert result["mac"] is None
+
+
+@pytest.mark.parametrize(
+    ("model_description", "expected"),
+    [
+        # Flat 12-char MAC gets colon-formatted, matching pyvidaa's probe_ip.
+        ("vidaa_support=1\nmac=001122334455", "00:11:22:33:44:55"),
+        # Already colon-formatted MACs are passed through untouched: the
+        # dynamic-auth hash is case- and format-sensitive.
+        ("vidaa_support=1\nmac=AA:BB:CC:DD:EE:FF", "AA:BB:CC:DD:EE:FF"),
+        # Priority is mac > macEthernet > macWifi REGARDLESS of the order the
+        # TV lists them in. A TV reporting several interfaces must resolve to
+        # the same MAC here as it does via probe_ip, or an SSDP-paired TV
+        # would later reauth (which probes) with different credentials.
+        (
+            "vidaa_support=1\nmacWifi=AABBCCDDEEFF\nmacEthernet=112233445566",
+            "11:22:33:44:55:66",
+        ),
+        (
+            "vidaa_support=1\nmacEthernet=112233445566\nmacWifi=AABBCCDDEEFF",
+            "11:22:33:44:55:66",
+        ),
+        (
+            "vidaa_support=1\nmacWifi=AABBCCDDEEFF\nmac=112233445566",
+            "11:22:33:44:55:66",
+        ),
+        # Wifi-only TVs still resolve.
+        ("vidaa_support=1\nmacWifi=AABBCCDDEEFF", "AA:BB:CC:DD:EE:FF"),
+        # No MAC in the descriptor - caller falls back to a UPnP probe.
+        ("vidaa_support=1\nmodel=H55A6500", None),
+        ("", None),
+    ],
+)
+def test_mac_from_descriptor(model_description: str, expected: str | None) -> None:
+    """MAC selection matches pyvidaa's probe_ip priority and formatting."""
+    assert mac_from_descriptor(parse_model_description(model_description)) == expected
+
+
+def test_parse_model_description_handles_none() -> None:
+    """A missing modelDescription must not raise."""
+    assert parse_model_description(None) == {}
+
+
+async def test_ssdp_discovery_uses_mac_from_descriptor(
+    hass: HomeAssistant,
+    mock_config_flow_tv: MagicMock,
+    mock_certs_exist: MagicMock,
+    mock_setup_entry: AsyncMock,
+) -> None:
+    """The descriptor MAC is used for auth and persisted, not a random one.
+
+    probe_ip is mocked to a different MAC, so this also proves the descriptor
+    short-circuits the probe rather than being overwritten by it.
+    """
+    discovery_info = _create_ssdp_discovery_info(
+        model_description="vidaa_support=1\nmacEthernet=AABBCCDDEEFF"
+    )
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_SSDP},
+        data=discovery_info,
+    )
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"pin": "1234"}
+    )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_MAC] == "AA:BB:CC:DD:EE:FF"
+
+
+async def test_pair_flow_uses_probed_mac_when_descriptor_has_none(
+    hass: HomeAssistant,
+    mock_config_flow_tv: MagicMock,
+    mock_certs_exist: MagicMock,
+    mock_setup_entry: AsyncMock,
+) -> None:
+    """On the manual path the MAC comes from the UPnP probe, not at random."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_HOST: "192.168.1.100"},
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"pin": "1234"},
+    )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    # The probe_ip mock in the fixture reports this MAC.
+    assert result["data"][CONF_MAC] == "00:11:22:33:44:55"
+
+
+async def test_ssdp_brand_survives_a_mac_resolving_probe(
+    hass: HomeAssistant,
+    mock_config_flow_tv: MagicMock,
+    mock_certs_exist: MagicMock,
+    mock_setup_entry: AsyncMock,
+) -> None:
+    """A descriptor brand must not be clobbered by a probe run for the MAC.
+
+    The descriptor carries brand=tpv but no MAC, so the pairing step probes to
+    resolve one. brand is an auth input, so taking the probe's brand here would
+    build credentials the TV rejects.
+    """
+    discovery_info = _create_ssdp_discovery_info(
+        model_description="vidaa_support=1\nbrand=tpv\nmodel=H55A6500"
+    )
+
+    with patch(
+        "custom_components.vidaa_tv.config_flow.probe_ip",
+        return_value=MagicMock(brand="his", mac=None),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": config_entries.SOURCE_SSDP},
+            data=discovery_info,
+        )
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"pin": "1234"}
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_BRAND] == "tpv"
+
+
+async def test_pair_flow_clears_stale_token_before_pairing(
+    hass: HomeAssistant,
+    mock_config_flow_tv: MagicMock,
+    mock_certs_exist: MagicMock,
+    mock_setup_entry: AsyncMock,
+) -> None:
+    """A leftover token would make the client reconnect instead of pairing."""
+    with patch(
+        "custom_components.vidaa_tv.config_flow.delete_token"
+    ) as mock_delete_token:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {CONF_HOST: "192.168.1.100"},
+        )
+
+    mock_delete_token.assert_called_once_with(None, "192.168.1.100", DEFAULT_PORT)
 
 
 async def test_ssdp_discovery_certs_not_found(
