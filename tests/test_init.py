@@ -13,7 +13,13 @@ from custom_components.vidaa_tv import (
     async_setup_entry,
     async_unload_entry,
 )
-from custom_components.vidaa_tv.const import DOMAIN
+from custom_components.vidaa_tv.const import (
+    AUTH_MODE_AUTO,
+    AUTH_MODE_DYNAMIC,
+    AUTH_MODE_STATIC,
+    CONF_AUTH_MODE,
+    DOMAIN,
+)
 
 from .conftest import MOCK_CONFIG_ENTRY_DATA, create_mock_config_entry
 
@@ -150,3 +156,46 @@ async def test_launch_app_service(
 
     # Service call completed without raising an error
     # (mock assertions are complex due to coordinator indirection)
+
+
+# --- authentication mode ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("entry_data_mode", "options_mode", "expect_dynamic"),
+    [
+        (None, None, True),                 # paired before the option existed
+        (AUTH_MODE_AUTO, None, True),
+        (AUTH_MODE_STATIC, None, False),    # what a legacy-firmware TV pairs as
+        (AUTH_MODE_DYNAMIC, AUTH_MODE_STATIC, False),  # options override wins
+        (AUTH_MODE_STATIC, AUTH_MODE_DYNAMIC, True),
+    ],
+)
+async def test_setup_entry_uses_the_stored_auth_mode(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+    entry_data_mode: str | None,
+    options_mode: str | None,
+    expect_dynamic: bool,
+) -> None:
+    """The runtime client must use the scheme the entry paired with.
+
+    Regression: this was hardcoded to dynamic auth, so a TV that needs the
+    static login could pair but never reconnect after a restart.
+    """
+    data = dict(MOCK_CONFIG_ENTRY_DATA)
+    if entry_data_mode is not None:
+        data[CONF_AUTH_MODE] = entry_data_mode
+    options = {CONF_AUTH_MODE: options_mode} if options_mode else {}
+
+    entry = create_mock_config_entry(hass, data=data, options=options)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.vidaa_tv.AsyncVidaaTV",
+        return_value=mock_vidaa_tv,
+    ) as mock_class:
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert mock_class.call_args.kwargs["use_dynamic_auth"] is expect_dynamic

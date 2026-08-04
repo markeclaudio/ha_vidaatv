@@ -19,6 +19,10 @@ from custom_components.vidaa_tv.config_flow import (
     parse_model_description,
 )
 from custom_components.vidaa_tv.const import (
+    AUTH_MODE_AUTO,
+    AUTH_MODE_DYNAMIC,
+    AUTH_MODE_STATIC,
+    CONF_AUTH_MODE,
     CONF_BRAND,
     CONF_CERTFILE,
     CONF_DEVICE_ID,
@@ -716,3 +720,139 @@ async def test_ssdp_discovery_certs_not_found(
     # Should show certs step
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "certs"
+
+
+# --- authentication mode ---------------------------------------------------
+
+
+async def test_certs_step_offers_an_auth_mode(
+    hass: HomeAssistant,
+    mock_config_flow_tv: MagicMock,
+    mock_certs_not_exist: MagicMock,
+) -> None:
+    """The escape hatch for a TV that misreports its protocol version."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_HOST: "192.168.1.100"}
+    )
+
+    assert result["step_id"] == "certs"
+    assert CONF_AUTH_MODE in result["data_schema"].schema
+
+
+async def test_static_auth_mode_skips_the_mac_probe(hass: HomeAssistant) -> None:
+    """Static credentials derive nothing from the MAC, so don't pay for a probe.
+
+    The probe tries both UPnP ports with a timeout each, which is seconds of
+    config-flow latency against a slow or half-awake TV.
+    """
+    from custom_components.vidaa_tv.config_flow import validate_connection
+
+    with patch(
+        "custom_components.vidaa_tv.config_flow.AsyncVidaaTV", autospec=True
+    ) as mock_class, patch(
+        "custom_components.vidaa_tv.config_flow.probe_ip"
+    ) as mock_probe:
+        tv = mock_class.return_value
+        tv.async_connect = AsyncMock(return_value=True)
+        tv.async_disconnect = AsyncMock()
+        tv.async_get_device_info = AsyncMock(return_value=MOCK_DEVICE_INFO)
+        tv.async_get_tv_info = AsyncMock(return_value=None)
+        tv.auth_mode = AUTH_MODE_STATIC
+
+        result = await validate_connection(
+            hass, "192.168.1.100", DEFAULT_PORT, auth_mode=AUTH_MODE_STATIC
+        )
+
+    mock_probe.assert_not_called()
+    assert mock_class.call_args.kwargs["use_dynamic_auth"] is False
+    assert result["auth_mode"] == AUTH_MODE_STATIC
+
+
+async def test_auto_auth_mode_still_probes_and_uses_dynamic(
+    hass: HomeAssistant,
+) -> None:
+    """The default must keep behaving as before for modern TVs."""
+    from custom_components.vidaa_tv.config_flow import validate_connection
+
+    probe_device = MagicMock(brand="his", mac="00:11:22:33:44:55")
+    with patch(
+        "custom_components.vidaa_tv.config_flow.AsyncVidaaTV", autospec=True
+    ) as mock_class, patch(
+        "custom_components.vidaa_tv.config_flow.probe_ip", return_value=probe_device
+    ) as mock_probe:
+        tv = mock_class.return_value
+        tv.async_connect = AsyncMock(return_value=True)
+        tv.async_disconnect = AsyncMock()
+        tv.async_get_device_info = AsyncMock(return_value=MOCK_DEVICE_INFO)
+        tv.async_get_tv_info = AsyncMock(return_value=None)
+        tv.auth_mode = AUTH_MODE_DYNAMIC
+
+        result = await validate_connection(hass, "192.168.1.100", DEFAULT_PORT)
+
+    mock_probe.assert_called_once()
+    assert mock_class.call_args.kwargs["use_dynamic_auth"] is True
+    assert result["auth_mode"] == AUTH_MODE_DYNAMIC
+
+
+async def test_pairing_persists_the_scheme_that_worked(
+    hass: HomeAssistant,
+    mock_config_flow_tv: MagicMock,
+    mock_certs_exist: MagicMock,
+    mock_setup_entry: AsyncMock,
+) -> None:
+    """"auto" resolves to a concrete scheme, so later connects skip the misses."""
+    mock_config_flow_tv.auth_mode = AUTH_MODE_STATIC
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_HOST: "192.168.1.100"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"pin": "1234"}
+    )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_AUTH_MODE] == AUTH_MODE_STATIC
+
+
+async def test_options_flow_can_override_the_auth_mode(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """An already-paired entry can be switched without re-adding the TV."""
+    entry = create_mock_config_entry(hass)
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            "scan_interval": 30,
+            "wol_mac": "00:11:22:33:44:55",
+            CONF_AUTH_MODE: AUTH_MODE_STATIC,
+        },
+    )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_AUTH_MODE] == AUTH_MODE_STATIC
+
+
+async def test_entries_without_an_auth_mode_default_to_auto(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """Entries paired before this option existed must keep working."""
+    entry = create_mock_config_entry(hass)
+    entry.add_to_hass(hass)
+    assert CONF_AUTH_MODE not in entry.data
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    schema = result["data_schema"].schema
+    auth_key = next(k for k in schema if k == CONF_AUTH_MODE)
+    assert auth_key.default() == AUTH_MODE_AUTO

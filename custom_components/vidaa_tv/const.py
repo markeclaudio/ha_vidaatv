@@ -15,10 +15,22 @@ CONF_BRAND: Final = "brand"
 CONF_SW_VERSION: Final = "sw_version"
 CONF_CERTFILE: Final = "certfile"
 CONF_KEYFILE: Final = "keyfile"
+CONF_AUTH_MODE: Final = "auth_mode"
+
+# Credential scheme. "auto" detects the TV's protocol version and falls back
+# through the other methods if it rejects the credentials; "static" forces the
+# fixed login that pre-dynamic firmware (transport_protocol < 3000) needs;
+# "dynamic" forces the timestamp-hash algorithm. Entries created before this
+# option existed have no value stored and are treated as "auto".
+AUTH_MODE_AUTO: Final = "auto"
+AUTH_MODE_DYNAMIC: Final = "dynamic"
+AUTH_MODE_STATIC: Final = "static"
+AUTH_MODES: Final = [AUTH_MODE_AUTO, AUTH_MODE_DYNAMIC, AUTH_MODE_STATIC]
 
 # Default values
 DEFAULT_PORT: Final = 36669
 DEFAULT_NAME: Final = "Hisense TV"
+DEFAULT_AUTH_MODE: Final = AUTH_MODE_AUTO
 
 # Default certificate paths (relative to HA config directory)
 DEFAULT_CERT_DIR: Final = "certs"

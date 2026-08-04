@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 (Library/protocol changes are tracked separately in the [`pyvidaa`](https://github.com/warrenrees/pyvidaa) repository.)
 
+## [2.1.0]
+
+### Added
+
+- **Support for TVs on older firmware.** These models predate the credential
+  scheme newer TVs use, so setup failed at the first connection with
+  `not authorized` (MQTT CONNACK code 5) — after the TLS handshake had already
+  succeeded, so the certificates were never the problem. Setup now detects
+  them and falls back automatically. Such TVs issue no auth token; they
+  authorise Home Assistant directly once the PIN is entered, and the pairing is
+  stored so it survives restarts.
+- **Authentication mode** option (auto / dynamic / static) on the certificates
+  step and in the options flow, as an escape hatch for a TV whose reported
+  firmware version does not match what it actually accepts. Existing entries
+  have no value stored and keep working as "auto".
+- The scheme that actually connected is recorded on the config entry, so later
+  connections go straight to it instead of retrying ones the TV rejected.
+
+### Changed
+
+- Requires `pyvidaa` 2.2.0.
+- Setup skips the UPnP MAC probe when using static authentication, which does
+  not derive anything from the MAC — several seconds faster against a slow TV.
+
 ## [2.0.5]
 
 ### Fixed

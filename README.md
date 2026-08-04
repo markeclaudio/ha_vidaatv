@@ -288,6 +288,22 @@ remote: remote.living_room_tv_remote
 3. Restart the TV and try again
 4. Check if there's a "Remote App" or "Mobile App" setting in TV settings
 
+### Setup fails with "not authorized" (MQTT code 5)
+
+The TV rejected the credentials. Because this happens *after* the TLS handshake,
+the certificates themselves are fine.
+
+The usual cause is **older TV firmware**, which predates the credential scheme
+newer models use. Setup detects this and falls back automatically, but you can
+force it: pick **Authentication mode → Static** on the certificates step, or
+switch an existing TV over in **Settings → Devices & Services → Vidaa TV →
+Configure**. These TVs issue no auth token — they authorise Home Assistant
+directly once you enter the PIN.
+
+If your TV is not on old firmware, check its **date, time, timezone and DST**
+settings: the newer credentials are time-based, and a TV whose clock disagrees
+with Home Assistant's rejects them.
+
 ### Connection lost after reboot
 
 The integration stores authentication tokens that should persist across reboots. If you experience issues:

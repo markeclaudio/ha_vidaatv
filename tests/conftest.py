@@ -15,6 +15,7 @@ from homeassistant.setup import async_setup_component
 pytest_plugins = ["pytest_homeassistant_custom_component"]
 
 from custom_components.vidaa_tv.const import (
+    AUTH_MODE_DYNAMIC,
     CONF_CERTFILE,
     CONF_DEVICE_ID,
     CONF_KEYFILE,
@@ -192,6 +193,9 @@ def mock_config_flow_tv() -> Generator[MagicMock, None, None]:
         )
         mock_instance.async_start_pairing = AsyncMock()
         mock_instance.async_authenticate = AsyncMock(return_value=True)
+        # The scheme the client reports after connecting; the flow persists it.
+        # A bare autospec mock would yield a MagicMock here and store that.
+        mock_instance.auth_mode = AUTH_MODE_DYNAMIC
 
         yield mock_instance
 

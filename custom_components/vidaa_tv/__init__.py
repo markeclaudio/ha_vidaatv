@@ -22,9 +22,11 @@ from .const import (
     CONF_PORT,
     CONF_MAC,
     CONF_DEVICE_ID,
+    CONF_AUTH_MODE,
     CONF_BRAND,
     CONF_CERTFILE,
     CONF_KEYFILE,
+    DEFAULT_AUTH_MODE,
     DEFAULT_PORT,
     PLATFORMS,
     SERVICE_SEND_KEY,
@@ -37,7 +39,7 @@ from .coordinator import VidaaTVDataUpdateCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 # Import from PyPI package (pyvidaa)
-from pyvidaa import AsyncVidaaTV
+from pyvidaa import AsyncVidaaTV, auth_mode_kwargs
 from pyvidaa.config import get_storage
 
 
@@ -69,8 +71,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: VidaaTVConfigEntry) -> b
     brand = entry.data.get(CONF_BRAND, "his")
     certfile = entry.data.get(CONF_CERTFILE)
     keyfile = entry.data.get(CONF_KEYFILE)
+    # An options-flow override wins over the scheme the entry paired with.
+    # Entries created before this option existed have neither, and get "auto".
+    auth_mode = entry.options.get(
+        CONF_AUTH_MODE, entry.data.get(CONF_AUTH_MODE)
+    ) or DEFAULT_AUTH_MODE
 
-    _LOGGER.debug("Setting up Hisense TV at %s:%s", host, port)
+    _LOGGER.debug("Setting up Hisense TV at %s:%s (auth mode: %s)", host, port, auth_mode)
 
     # Create the async TV client
     tv = AsyncVidaaTV(
@@ -79,9 +86,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: VidaaTVConfigEntry) -> b
         certfile=certfile,
         keyfile=keyfile,
         mac_address=mac or device_id,
-        use_dynamic_auth=True,
         brand=brand,
         enable_persistence=True,
+        **auth_mode_kwargs(auth_mode),
     )
 
     # Best-effort connect. The TV may be in deep sleep (Wake-on-LAN) — don't block

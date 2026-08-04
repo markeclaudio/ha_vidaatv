@@ -21,6 +21,9 @@ from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -29,6 +32,7 @@ from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
 
 from .const import (
     DOMAIN,
+    CONF_AUTH_MODE,
     CONF_DEVICE_ID,
     CONF_MAC,
     CONF_MODEL,
@@ -36,6 +40,10 @@ from .const import (
     CONF_SW_VERSION,
     CONF_CERTFILE,
     CONF_KEYFILE,
+    AUTH_MODES,
+    AUTH_MODE_AUTO,
+    AUTH_MODE_STATIC,
+    DEFAULT_AUTH_MODE,
     DEFAULT_NAME,
     DEFAULT_PORT,
     DEFAULT_CERT_DIR,
@@ -60,8 +68,19 @@ lib_path = Path(__file__).parent.parent.parent
 if str(lib_path) not in sys.path:
     sys.path.insert(0, str(lib_path))
 
-from pyvidaa import AsyncVidaaTV, delete_token
+from pyvidaa import AsyncVidaaTV, auth_mode_kwargs, delete_token
 from pyvidaa.discovery import probe_ip
+
+
+def auth_mode_selector() -> SelectSelector:
+    """Selector for the credential scheme, shared by the setup and options forms."""
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=list(AUTH_MODES),
+            mode=SelectSelectorMode.DROPDOWN,
+            translation_key="auth_mode",
+        )
+    )
 
 
 def parse_model_description(model_desc: str | None) -> dict[str, str]:
@@ -131,14 +150,18 @@ async def validate_connection(
     keyfile: str | None = None,
     mac_address: str | None = None,
     brand: str = "his",
+    auth_mode: str = DEFAULT_AUTH_MODE,
 ) -> dict[str, Any]:
     """Validate we can connect to the TV."""
     # Dynamic-auth credentials are derived from the MAC; the TV recomputes the
     # same hash from its own real MAC, so a random one is never accepted past
     # the initial CONNACK. Resolve the TV's real MAC via a UPnP probe before
     # falling back to a random one (which will just fail).
+    #
+    # Static auth derives nothing from the MAC, so skip the probe there - it
+    # costs seconds against a slow TV and its result is never used.
     mac = mac_address
-    if not mac:
+    if not mac and auth_mode != AUTH_MODE_STATIC:
         try:
             device = await hass.async_add_executor_job(probe_ip, host)
             if device and device.mac:
@@ -146,17 +169,18 @@ async def validate_connection(
         except Exception as err:  # noqa: BLE001 - best effort, falls back below
             _LOGGER.debug("Could not probe MAC for %s: %s", host, err)
     mac_resolved = mac is not None
-    mac = mac or generate_random_mac()
+    if auth_mode != AUTH_MODE_STATIC:
+        mac = mac or generate_random_mac()
 
     tv = AsyncVidaaTV(
         host=host,
         port=port,
         certfile=certfile,
         keyfile=keyfile,
-        use_dynamic_auth=True,
         mac_address=mac,
         brand=brand,
         enable_persistence=False,
+        **auth_mode_kwargs(auth_mode),
     )
 
     try:
@@ -179,6 +203,9 @@ async def validate_connection(
             # flow can reuse it instead of probing the TV a second time.
             # None when we fell back to a random MAC.
             "mac": mac if mac_resolved else None,
+            # The scheme that actually connected. Persisting it means later
+            # connects skip the methods this TV already rejected.
+            "auth_mode": tv.auth_mode or auth_mode,
         }
 
         if device_info:
@@ -229,6 +256,7 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._discovery_info: SsdpServiceInfo | None = None
         self._certfile: str | None = None
         self._keyfile: str | None = None
+        self._auth_mode: str = DEFAULT_AUTH_MODE
         # The connected client that triggered the PIN dialog. The TV ties the
         # pairing session to this one MQTT connection, so authenticate() must
         # run on it - reconnecting with a fresh client loses the session.
@@ -252,6 +280,10 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._model = info.get("model")
         self._sw_version = info.get("sw_version")
         self._remember_mac(info.get("mac"))
+        # Pin "auto" down to whatever actually connected, so pairing and every
+        # later connect go straight to it.
+        if info.get("auth_mode"):
+            self._auth_mode = info["auth_mode"]
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -289,6 +321,7 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._certfile = user_input.get(CONF_CERTFILE) or default_certfile
             self._keyfile = user_input.get(CONF_KEYFILE) or default_keyfile
+            self._auth_mode = user_input.get(CONF_AUTH_MODE) or DEFAULT_AUTH_MODE
 
             # Validate cert paths
             if not check_certs_exist(self._certfile, self._keyfile):
@@ -303,6 +336,7 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         certfile=self._certfile,
                         keyfile=self._keyfile,
                         mac_address=self._mac if self._mac_resolved else None,
+                        auth_mode=self._auth_mode,
                     )
                     self._apply_validation_result(info)
 
@@ -334,6 +368,7 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         certfile=self._certfile,
                         keyfile=self._keyfile,
                         mac_address=self._mac if self._mac_resolved else None,
+                        auth_mode=self._auth_mode,
                     )
                     self._apply_validation_result(info)
 
@@ -358,6 +393,9 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 {
                     vol.Optional(CONF_CERTFILE, default=default_certfile): str,
                     vol.Optional(CONF_KEYFILE, default=default_keyfile): str,
+                    vol.Optional(
+                        CONF_AUTH_MODE, default=self._auth_mode
+                    ): auth_mode_selector(),
                 }
             ),
             errors=errors,
@@ -435,6 +473,7 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 keyfile=self._keyfile,
                 mac_address=self._mac if self._mac_resolved else None,
                 brand=self._brand or "his",
+                auth_mode=self._auth_mode,
             )
             self._apply_validation_result(info)
 
@@ -471,6 +510,8 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._certfile = entry_data.get(CONF_CERTFILE)
         self._keyfile = entry_data.get(CONF_KEYFILE)
         self._device_id = entry_data.get(CONF_DEVICE_ID)
+        # Entries paired before this option existed have no value stored.
+        self._auth_mode = entry_data.get(CONF_AUTH_MODE) or DEFAULT_AUTH_MODE
         self._mac = generate_random_mac()  # Placeholder; resolved before pairing
         self._mac_resolved = False
         return await self.async_step_reauth_confirm()
@@ -559,6 +600,7 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_SW_VERSION: self._sw_version,
                         CONF_CERTFILE: self._certfile,
                         CONF_KEYFILE: self._keyfile,
+                        CONF_AUTH_MODE: self._auth_mode,
                     }
 
                     # Handle reauth - update existing entry
@@ -620,7 +662,10 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # particular matters: dynamic-auth credentials are a hash of it,
             # and the TV recomputes that hash with its own real MAC, so a
             # random placeholder is silently dropped right after CONNACK.
-            if (not self._brand or not self._mac_resolved) and self._host:
+            # Static auth derives nothing from the MAC, so only probe when the
+            # brand is still unknown (SSDP may not have supplied it).
+            needs_mac = self._auth_mode != AUTH_MODE_STATIC and not self._mac_resolved
+            if (not self._brand or needs_mac) and self._host:
                 try:
                     device = await self.hass.async_add_executor_job(
                         probe_ip, self._host
@@ -636,7 +681,7 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 except Exception as err:  # noqa: BLE001 - best effort, falls back to "his"
                     _LOGGER.debug("Could not probe brand/MAC for %s: %s", self._host, err)
 
-            if not self._mac_resolved:
+            if not self._mac_resolved and self._auth_mode != AUTH_MODE_STATIC:
                 _LOGGER.warning(
                     "Could not resolve %s's real MAC address; falling back to a "
                     "random one for dynamic auth. The TV will likely reject this "
@@ -661,16 +706,19 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 port=self._port,
                 certfile=self._certfile,
                 keyfile=self._keyfile,
-                use_dynamic_auth=True,
                 mac_address=self._mac,
                 brand=self._brand or "his",
                 enable_persistence=True,
+                **auth_mode_kwargs(self._auth_mode),
             )
 
             pin_shown = False
             try:
                 connected = await tv.async_connect(timeout=TIMEOUT_CONNECT)
                 if connected:
+                    # "auto" may have landed on a different scheme than the one
+                    # we came in with; record it so the entry stores what works.
+                    self._auth_mode = tv.auth_mode or self._auth_mode
                     await tv.async_start_pairing()
                     # Keep connection open briefly for PIN to appear
                     await asyncio.sleep(1)
@@ -734,6 +782,13 @@ class VidaaTVOptionsFlow(config_entries.OptionsFlow):
         current_wol_mac = self.config_entry.options.get(
             "wol_mac", self.config_entry.data.get(CONF_DEVICE_ID, "")
         )
+        # The escape hatch for a TV whose reported protocol version does not
+        # match what it actually accepts. Falls back to the paired-with scheme,
+        # then "auto" for entries created before this option existed.
+        current_auth_mode = self.config_entry.options.get(
+            CONF_AUTH_MODE,
+            self.config_entry.data.get(CONF_AUTH_MODE) or DEFAULT_AUTH_MODE,
+        )
 
         return self.async_show_form(
             step_id="init",
@@ -757,6 +812,10 @@ class VidaaTVOptionsFlow(config_entries.OptionsFlow):
                     ): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.TEXT)
                     ),
+                    vol.Optional(
+                        CONF_AUTH_MODE,
+                        default=current_auth_mode,
+                    ): auth_mode_selector(),
                 }
             ),
         )
