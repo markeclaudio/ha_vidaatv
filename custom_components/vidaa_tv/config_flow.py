@@ -646,6 +646,57 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"host": self._host},
         )
 
+    async def _create_entry_from_current_state(self) -> FlowResult:
+        """Persist the config entry from the flow's current device state.
+
+        Shared by the PIN-auth success path and the no-auth path (TVs that
+        connect and answer without ever showing a PIN), so both build
+        identical entry data. All device fields are read from self, having
+        been populated by validation/pairing before this is called.
+        """
+        new_data = {
+            CONF_HOST: self._host,
+            CONF_PORT: self._port,
+            CONF_NAME: self._name,
+            CONF_DEVICE_ID: self._device_id,
+            CONF_MAC: self._mac,  # New MAC used for auth
+            # Only when it really came from the TV: Wake-on-LAN aimed at a
+            # random placeholder wakes nothing.
+            CONF_HW_MAC: self._mac if self._mac_resolved else None,
+            CONF_MAC_ETHERNET: self._mac_ethernet,
+            CONF_MAC_WIFI: self._mac_wifi,
+            CONF_MODEL: self._model,
+            CONF_BRAND: self._brand or "his",
+            CONF_SW_VERSION: self._sw_version,
+            CONF_CERTFILE: self._certfile,
+            CONF_KEYFILE: self._keyfile,
+            CONF_USE_SSL: self._use_ssl,
+            CONF_AUTH_MODE: self._auth_mode,
+        }
+
+        # Handle reauth - update existing entry
+        if self.source == config_entries.SOURCE_REAUTH:
+            # Merge, never replace. Reauth re-derives only what it can see, and
+            # it usually runs against a TV that is misbehaving or asleep - so a
+            # probe miss would otherwise null out the stored MACs, model and
+            # firmware, taking Wake-on-LAN down with them.
+            entry = self._get_reauth_entry()
+            merged = {
+                **entry.data,
+                **{k: v for k, v in new_data.items() if v is not None},
+            }
+            return self.async_update_reload_and_abort(entry, data=merged)
+
+        # Set unique ID to prevent duplicates
+        if self._device_id:
+            await self.async_set_unique_id(self._device_id)
+            self._abort_if_unique_id_configured(
+                updates={CONF_HOST: self._host, CONF_PORT: self._port}
+            )
+
+        # Create the config entry
+        return self.async_create_entry(title=self._name, data=new_data)
+
     async def async_step_pair(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -707,52 +758,7 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             "continuing - the integration will fetch it after setup"
                         )
 
-                    new_data = {
-                        CONF_HOST: self._host,
-                        CONF_PORT: self._port,
-                        CONF_NAME: self._name,
-                        CONF_DEVICE_ID: self._device_id,
-                        CONF_MAC: self._mac,  # New MAC used for auth
-                        # Only when it really came from the TV: Wake-on-LAN
-                        # aimed at a random placeholder wakes nothing.
-                        CONF_HW_MAC: self._mac if self._mac_resolved else None,
-                        CONF_MAC_ETHERNET: self._mac_ethernet,
-                        CONF_MAC_WIFI: self._mac_wifi,
-                        CONF_MODEL: self._model,
-                        CONF_BRAND: self._brand or "his",
-                        CONF_SW_VERSION: self._sw_version,
-                        CONF_CERTFILE: self._certfile,
-                        CONF_KEYFILE: self._keyfile,
-                        CONF_USE_SSL: self._use_ssl,
-                        CONF_AUTH_MODE: self._auth_mode,
-                    }
-
-                    # Handle reauth - update existing entry
-                    if self.source == config_entries.SOURCE_REAUTH:
-                        # Merge, never replace. Reauth re-derives only what it
-                        # can see, and it usually runs against a TV that is
-                        # misbehaving or asleep - so a probe miss would
-                        # otherwise null out the stored MACs, model and
-                        # firmware, taking Wake-on-LAN down with them.
-                        entry = self._get_reauth_entry()
-                        merged = {
-                            **entry.data,
-                            **{k: v for k, v in new_data.items() if v is not None},
-                        }
-                        return self.async_update_reload_and_abort(entry, data=merged)
-
-                    # Set unique ID to prevent duplicates
-                    if self._device_id:
-                        await self.async_set_unique_id(self._device_id)
-                        self._abort_if_unique_id_configured(
-                            updates={CONF_HOST: self._host, CONF_PORT: self._port}
-                        )
-
-                    # Create the config entry
-                    return self.async_create_entry(
-                        title=self._name,
-                        data=new_data,
-                    )
+                    return await self._create_entry_from_current_state()
 
                 # Auth failed. Drop the (now stale) session; the block below
                 # re-triggers a fresh PIN so the user can try again.
@@ -850,6 +856,38 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # "auto" may have landed on a different scheme than the one
                     # we came in with; record it so the entry stores what works.
                     self._auth_mode = tv.auth_mode or self._auth_mode
+                    # A TV that needs no authentication (already authorized, or
+                    # older firmware with a fixed static login) never shows a
+                    # PIN and rejects any code entered - so asking for one would
+                    # strand setup. Create the entry straight away, best-effort
+                    # enriching it with whatever device info this session serves.
+                    if not tv.needs_authentication():
+                        device_info = None
+                        try:
+                            for _attempt in range(3):
+                                device_info = await tv.async_get_device_info(
+                                    timeout=5
+                                )
+                                if device_info:
+                                    break
+                                await asyncio.sleep(1)
+                        except Exception as err:  # noqa: BLE001 - best effort
+                            _LOGGER.debug("Device info fetch failed: %s", err)
+                        if device_info:
+                            self._device_id = (
+                                device_info.get("network_type") or self._device_id
+                            )
+                            self._model = (
+                                device_info.get("model_name") or self._model
+                            )
+                            self._sw_version = (
+                                device_info.get("tv_version") or self._sw_version
+                            )
+                            if device_info.get("tv_name"):
+                                self._name = device_info.get("tv_name")
+                        await tv.async_disconnect()
+                        self._pairing_tv = None
+                        return await self._create_entry_from_current_state()
                     # Wait for the TV to confirm the dialog is actually on
                     # screen rather than assuming it appeared - otherwise we
                     # ask for a PIN the user cannot see.

@@ -128,6 +128,32 @@ async def test_user_flow_plain_mqtt_no_certs(
     assert result["data"][CONF_KEYFILE] is None
 
 
+async def test_user_flow_no_auth_skips_pin(
+    hass: HomeAssistant,
+    mock_config_flow_tv: MagicMock,
+    mock_certs_exist: MagicMock,
+    mock_setup_entry: AsyncMock,
+) -> None:
+    """A TV that needs no authentication is set up without a PIN prompt."""
+    # This TV never asks for a PIN (already authorized / static login).
+    mock_config_flow_tv.needs_authentication = MagicMock(return_value=False)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+
+    # Submitting the host should create the entry directly, skipping pairing.
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_HOST: "192.168.1.100"},
+    )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    # A PIN must never have been requested from the TV.
+    mock_config_flow_tv.async_start_pairing.assert_not_called()
+    mock_config_flow_tv.async_authenticate.assert_not_called()
+
+
 async def test_user_flow_cannot_connect(
     hass: HomeAssistant,
     mock_certs_exist: MagicMock,
