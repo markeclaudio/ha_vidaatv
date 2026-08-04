@@ -41,6 +41,8 @@ DEFAULT_KEY_FILENAME: Final = "vidaa_client.key"
 TIMEOUT_CONNECT: Final = 10
 TIMEOUT_COMMAND: Final = 5
 TIMEOUT_DISCOVERY: Final = 5
+# How long to wait for the TV to confirm the pairing PIN is on screen
+TIMEOUT_PIN_DIALOG: Final = 8
 
 # Scan interval for polling
 SCAN_INTERVAL: Final = 30

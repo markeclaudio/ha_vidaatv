@@ -50,6 +50,7 @@ from .const import (
     DEFAULT_CERT_FILENAME,
     DEFAULT_KEY_FILENAME,
     TIMEOUT_CONNECT,
+    TIMEOUT_PIN_DIALOG,
     SCAN_INTERVAL,
 )
 
@@ -262,6 +263,30 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # run on it - reconnecting with a fresh client loses the session.
         self._pairing_tv: AsyncVidaaTV | None = None
 
+    @callback
+    def async_remove(self) -> None:
+        """Tear down the held pairing connection when the flow goes away.
+
+        Home Assistant calls this when a flow is aborted or abandoned (the user
+        closes the dialog, or restarts setup). Without it the client stays
+        connected and keeps auto-reconnecting: a second attempt then has two
+        clients on the TV, and because MQTT requires a broker to drop the older
+        session when a client id is reused, they kick each other in a loop and
+        the PIN never survives long enough to appear.
+        """
+        tv = self._pairing_tv
+        self._pairing_tv = None
+        if tv is None:
+            return
+
+        async def _close() -> None:
+            try:
+                await tv.async_disconnect()
+            except Exception as err:  # noqa: BLE001 - teardown is best effort
+                _LOGGER.debug("Closing abandoned pairing connection failed: %s", err)
+
+        self.hass.async_create_task(_close())
+
     def _remember_mac(self, mac: str | None) -> None:
         """Record a real hardware MAC resolved from the TV.
 
@@ -415,9 +440,14 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Check for vidaa_support=1 in modelDescription to filter non-Hisense devices
         fields = parse_model_description(discovery_info.upnp.get("modelDescription"))
 
-        if fields.get("vidaa_support") != "1":
-            _LOGGER.debug("SSDP device does not have vidaa_support=1, ignoring: %s",
-                         discovery_info.ssdp_headers.get("_host"))
+        # Older firmware omits vidaa_support entirely while still speaking the
+        # protocol, so transport_protocol counts as proof too: it comes from
+        # the same VIDAA descriptor, and the unrelated MediaRenderers that
+        # match this SSDP type (Sonos, DLNA speakers) never publish it.
+        if fields.get("vidaa_support") != "1" and not fields.get("transport_protocol"):
+            _LOGGER.debug(
+                "SSDP device has neither vidaa_support=1 nor transport_protocol, "
+                "ignoring: %s", discovery_info.ssdp_headers.get("_host"))
             return self.async_abort(reason="not_vidaa_tv")
 
         # brand is an auth input (part of client_id/credentials)
@@ -719,12 +749,23 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # "auto" may have landed on a different scheme than the one
                     # we came in with; record it so the entry stores what works.
                     self._auth_mode = tv.auth_mode or self._auth_mode
-                    await tv.async_start_pairing()
-                    # Keep connection open briefly for PIN to appear
-                    await asyncio.sleep(1)
-                    # Hold the connection for the authenticate step.
+                    # Wait for the TV to confirm the dialog is actually on
+                    # screen rather than assuming it appeared - otherwise we
+                    # ask for a PIN the user cannot see.
+                    pin_shown = await tv.async_start_pairing(
+                        wait_for_pin=TIMEOUT_PIN_DIALOG
+                    )
+                    # Hold the connection for the authenticate step either way:
+                    # an already-authorized TV shows no PIN, and the entered
+                    # code still has to go over this same session.
                     self._pairing_tv = tv
-                    pin_shown = True
+                    if not pin_shown:
+                        _LOGGER.warning(
+                            "TV at %s did not confirm the PIN dialog; showing "
+                            "the form anyway in case it is already paired",
+                            self._host,
+                        )
+                        pin_shown = True
                 else:
                     errors["base"] = "cannot_connect"
                     await tv.async_disconnect()

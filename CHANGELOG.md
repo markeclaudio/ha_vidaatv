@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 (Library/protocol changes are tracked separately in the [`pyvidaa`](https://github.com/warrenrees/pyvidaa) repository.)
 
+## [2.1.1]
+
+### Fixed
+
+- **Home Assistant asked for a PIN that never appeared on the TV.** An
+  abandoned or restarted setup left its connection to the TV open and
+  auto-reconnecting. A second attempt then had two clients on the TV, and
+  because MQTT requires a broker to drop the older session when a client id is
+  reused, they kicked each other roughly once a second — so the pairing request
+  never survived long enough for the TV to show its code. Setup now closes its
+  connection when the flow is abandoned, and `pyvidaa` gives each connection a
+  distinct MQTT client id.
+- Setup now waits for the TV to confirm the PIN dialog is on screen instead of
+  pausing a second and hoping, so a TV that ignores the request is reported in
+  the log rather than silently producing an unenterable form.
+- **Older TVs were invisible to discovery.** Their UPnP descriptor omits
+  `vidaa_support` entirely, so SSDP discarded them and they had to be added by
+  IP. A descriptor carrying `transport_protocol` now counts as proof it is a
+  VIDAA TV; unrelated MediaRenderers on the same SSDP type (Sonos and other
+  DLNA speakers) publish no such field and are still ignored.
+
+### Changed
+
+- Requires `pyvidaa` 2.2.1.
+
 ## [2.1.0]
 
 ### Added
