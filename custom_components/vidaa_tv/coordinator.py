@@ -116,6 +116,13 @@ class VidaaTVDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.debug("No device info returned from TV yet")
             return
 
+        if not isinstance(info, dict):
+            # The library's request/response matching is not topic-correlated,
+            # so an unrelated push (a source list, a volume broadcast) can land
+            # here. Ignore it rather than raising out of the whole poll.
+            _LOGGER.debug("Ignoring non-dict device info: %r", info)
+            return
+
         self._device_info_misses = 0
 
         self.device_data = {
@@ -185,6 +192,19 @@ class VidaaTVDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:
             _LOGGER.debug("Token refresh check failed: %s", err)
 
+    @staticmethod
+    def _powered_off_data() -> dict[str, Any]:
+        """The reading for a TV that is off, as opposed to an update failure."""
+        return {
+            "is_on": False,
+            "state": None,
+            "statetype": None,
+            "volume": None,
+            "is_muted": False,
+            "app": None,
+            "source": None,
+        }
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from TV."""
         import time
@@ -204,8 +224,13 @@ class VidaaTVDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Try to connect with longer timeout for wake-up scenarios
                 connected = await self.tv.async_connect(timeout=5)
                 if not connected:
-                    self._available = False
-                    raise UpdateFailed("Failed to connect to TV")
+                    # A TV in standby takes its MQTT broker down with it, so
+                    # being unreachable is a power state, not a fetch failure.
+                    # Raising UpdateFailed here logged an error on every
+                    # power-off and dropped the remote entity to unavailable
+                    # for as long as the TV stayed off.
+                    _LOGGER.debug("TV is not reachable; reporting it as off")
+                    return self._powered_off_data()
                 _LOGGER.debug("Reconnect took %.2fs", time.monotonic() - start)
                 # A reconnect can mean the TV rebooted (e.g. a firmware update),
                 # so re-fetch device info to pick up a new firmware version -
@@ -225,16 +250,19 @@ class VidaaTVDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Get current state
             state_start = time.monotonic()
             state = await self.tv.async_get_state(timeout=3)
+            if state is None:
+                # State replies are QoS 0, so a single lost message would
+                # otherwise flash the TV "off" and straight back on. Ask once
+                # more before believing it: a genuinely sleeping TV stays quiet,
+                # and this costs nothing while it is awake.
+                _LOGGER.debug("No state reply; asking once more before reporting off")
+                state = await self.tv.async_get_state(timeout=3)
             _LOGGER.debug("get_state took %.2fs, raw state: %s", time.monotonic() - state_start, state)
 
-            # Determine power state
-            is_on = True
-            if state:
-                if state.get("statetype") == STATE_FAKE_SLEEP:
-                    is_on = False
-            else:
-                # No state response - TV might be off or unreachable
-                is_on = False
+            # Determine power state. No reply at all means the TV is off: it
+            # answers in ~100ms while awake, and this firmware does not
+            # broadcast fake_sleep_0 - it simply stops responding.
+            is_on = bool(state) and state.get("statetype") != STATE_FAKE_SLEEP
 
             # Get volume and mute status (only if TV is on)
             # Note: getvolume request may not work on all TVs, but volume is cached
@@ -288,7 +316,16 @@ class VidaaTVDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("State data: is_on=%s, statetype=%s, volume=%s, app=%s, source=%s",
                          is_on, statetype, volume, app, source)
             _LOGGER.debug("Total update took %.2fs", time.monotonic() - start)
+            # A poll got through, so any earlier auth trouble is behind us.
+            self._auth_failures = 0
             return data
+
+        except (UpdateFailed, ConfigEntryAuthFailed):
+            # Ours already, and already described. Re-wrapping produced the
+            # doubled "Error communicating with TV: Failed to connect to TV",
+            # and would downgrade a reauth request to a plain update failure.
+            self._available = False
+            raise
 
         except Exception as err:
             self._available = False

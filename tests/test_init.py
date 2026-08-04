@@ -73,11 +73,18 @@ async def test_async_setup_entry_loads_when_tv_offline(
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-    # Entry loads even though the TV is unreachable; the coordinator just reports
-    # the last update as unsuccessful until the TV comes online.
+    # Entry loads even though the TV is unreachable, and an unreachable TV is
+    # reported as OFF rather than as a failed update: it took its MQTT broker
+    # down with it, which is a power state, not an error. Treating it as a
+    # failure logged an error on every power-off and dropped the remote entity
+    # to unavailable for the whole time the TV was off.
     from homeassistant.config_entries import ConfigEntryState
     assert entry.state is ConfigEntryState.LOADED
-    assert entry.runtime_data.coordinator.last_update_success is False
+
+    coordinator = entry.runtime_data.coordinator
+    assert coordinator.last_update_success is True
+    assert coordinator.data["is_on"] is False
+    assert coordinator.available is True
 
 
 async def test_async_unload_entry(

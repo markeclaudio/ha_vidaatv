@@ -465,3 +465,98 @@ async def test_a_dropped_command_surfaces_as_an_error(
 
     with pytest.raises(HomeAssistantError):
         await coordinator.async_send_key("KEY_HOME")
+
+
+async def test_a_single_lost_state_reply_does_not_flap_the_tv_off(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """State replies are QoS 0, so one dropped message must not read as off.
+
+    Flipping off on the first miss would make the entity flicker; the TV is
+    asked once more before we believe it.
+    """
+    entry = create_mock_config_entry(hass)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.vidaa_tv.AsyncVidaaTV", return_value=mock_vidaa_tv
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    coordinator = entry.runtime_data.coordinator
+    # First ask is lost, the retry succeeds.
+    mock_vidaa_tv.async_get_state = AsyncMock(side_effect=[None, MOCK_TV_STATE])
+    await coordinator.async_refresh()
+
+    assert coordinator.data["is_on"] is True
+
+
+async def test_an_unreachable_tv_is_off_not_an_error(
+    hass: HomeAssistant,
+    mock_vidaa_tv_offline: MagicMock,
+) -> None:
+    """A TV in standby takes its MQTT broker with it.
+
+    Raising UpdateFailed for that logged an error on every power-off and made
+    the remote entity unavailable for as long as the TV stayed off.
+    """
+    entry = create_mock_config_entry(hass)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.vidaa_tv.AsyncVidaaTV", return_value=mock_vidaa_tv_offline
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    coordinator = entry.runtime_data.coordinator
+    assert coordinator.last_update_success is True
+    assert coordinator.data["is_on"] is False
+    assert coordinator.available is True
+
+
+async def test_auth_failures_reset_after_a_good_poll(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """Otherwise three auth blips spread over weeks trigger a spurious reauth."""
+    entry = create_mock_config_entry(hass)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.vidaa_tv.AsyncVidaaTV", return_value=mock_vidaa_tv
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    coordinator = entry.runtime_data.coordinator
+    coordinator._auth_failures = 2
+    await coordinator.async_refresh()
+
+    assert coordinator._auth_failures == 0
+
+
+async def test_device_info_ignores_a_non_dict_reply(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """An unrelated push can satisfy the library's request wait; a list landing
+    here used to raise AttributeError and kill the whole poll."""
+    mock_vidaa_tv.async_get_device_info = AsyncMock(
+        return_value=[{"sourceid": "5", "sourcename": "HDMI2"}]
+    )
+
+    entry = create_mock_config_entry(hass)
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.vidaa_tv.AsyncVidaaTV", return_value=mock_vidaa_tv
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    coordinator = entry.runtime_data.coordinator
+    assert coordinator.last_update_success is True
+    assert coordinator.device_data == {}

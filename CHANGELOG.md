@@ -34,6 +34,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The remote entity could report On while the media player reported Off.
 - The **wol_mac** option form could fail to submit on entries with no stored
   MAC — the very case where it is needed.
+- A TV in standby is now reported as simply **off** rather than as a
+  communication error. It takes its MQTT service down with it, so being
+  unreachable is a power state — treating it as a failure logged an error every
+  time the TV was switched off and made the remote entity unavailable for as
+  long as it stayed off.
+- A single lost state message can no longer flicker the TV to Off and back; it
+  is asked once more before being believed.
+- Source and app lists are no longer re-requested on every single update on TVs
+  that do not return them, which was two five-second requests per poll forever.
+- Repeated authentication blips spread over a long time no longer accumulate
+  into a spurious re-authentication prompt; the counter resets after any
+  successful poll.
 
 ### Added
 

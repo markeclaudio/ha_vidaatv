@@ -82,6 +82,10 @@ class VidaaTVMediaPlayer(CoordinatorEntity[VidaaTVDataUpdateCoordinator], MediaP
         self._sources: list[str] = []
         self._apps: list[dict] = []
         self._source_list: list[str] = []
+        # Set once we have asked the TV, so a set that never answers is not
+        # re-asked on every single update. Cleared when the list arrives empty
+        # after a reconnect is not worth the complexity: a reload re-probes.
+        self._sources_probed = False
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -195,7 +199,11 @@ class VidaaTVMediaPlayer(CoordinatorEntity[VidaaTVDataUpdateCoordinator], MediaP
             self.coordinator.data
             and self.coordinator.data.get("is_on")
             and not self._source_list
+            # Without this latch, a TV that never returns a source list spawns
+            # two 5s executor jobs on EVERY coordinator update, forever.
+            and not self._sources_probed
         ):
+            self._sources_probed = True
             self.hass.async_create_task(self._async_update_sources())
         super()._handle_coordinator_update()
 

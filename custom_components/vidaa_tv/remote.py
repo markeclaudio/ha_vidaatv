@@ -64,6 +64,8 @@ class VidaaTVRemote(CoordinatorEntity[VidaaTVDataUpdateCoordinator], RemoteEntit
         self._attr_unique_id = f"{self._device_id}_remote" if self._device_id else f"{entry.entry_id}_remote"
         self._apps: list[dict] = []
         self._activity_list: list[str] = []
+        # See media_player: without this the TV is re-asked on every update.
+        self._activities_probed = False
 
     async def async_added_to_hass(self) -> None:
         """Run when entity is added to hass."""
@@ -77,7 +79,9 @@ class VidaaTVRemote(CoordinatorEntity[VidaaTVDataUpdateCoordinator], RemoteEntit
             self.coordinator.data
             and self.coordinator.data.get("is_on")
             and not self._activity_list
+            and not self._activities_probed
         ):
+            self._activities_probed = True
             self.hass.async_create_task(self._async_update_activities())
         super()._handle_coordinator_update()
 
@@ -85,9 +89,13 @@ class VidaaTVRemote(CoordinatorEntity[VidaaTVDataUpdateCoordinator], RemoteEntit
         """Update activity list from TV."""
         try:
             apps = await self.coordinator.async_get_apps()
-            if apps:
+            if apps and isinstance(apps, list):
                 self._apps = apps
-                self._activity_list = [app.get("name") for app in apps if app.get("name")]
+                self._activity_list = [
+                    app.get("name")
+                    for app in apps
+                    if isinstance(app, dict) and app.get("name")
+                ]
                 _LOGGER.debug("Updated activity list with %d apps", len(self._activity_list))
         except Exception as err:
             _LOGGER.debug("Error updating activities: %s", err)
