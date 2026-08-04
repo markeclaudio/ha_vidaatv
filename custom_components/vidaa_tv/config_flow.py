@@ -13,7 +13,6 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.components import ssdp
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
@@ -26,6 +25,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
+from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
 
 from .const import (
     DOMAIN,
@@ -60,8 +60,48 @@ lib_path = Path(__file__).parent.parent.parent
 if str(lib_path) not in sys.path:
     sys.path.insert(0, str(lib_path))
 
-from pyvidaa import AsyncVidaaTV
+from pyvidaa import AsyncVidaaTV, delete_token
 from pyvidaa.discovery import probe_ip
+
+
+def parse_model_description(model_desc: str | None) -> dict[str, str]:
+    """Parse an SSDP/UPnP modelDescription blob into its key=value pairs.
+
+    Mirrors pyvidaa's own descriptor parsing (discovery._probe_ip_port) so the
+    SSDP path and the UPnP probe path read the descriptor identically.
+    """
+    fields: dict[str, str] = {}
+    for line in (model_desc or "").split("\n"):
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        fields[key.strip()] = value.strip()
+    return fields
+
+
+def mac_from_descriptor(fields: dict[str, str]) -> str | None:
+    """Pick the TV's real hardware MAC out of parsed descriptor fields.
+
+    Dynamic-auth credentials are derived from the MAC and the TV recomputes
+    the same hash using its own real MAC - a random MAC here will never
+    match, so the TV silently drops the session after the initial CONNACK.
+
+    The priority (mac, then macEthernet, then macWifi) and the colon
+    formatting deliberately match pyvidaa's probe_ip. A TV that reports more
+    than one interface must resolve to the SAME MAC however it was found, or
+    an SSDP-discovered TV would pair with one MAC and later reauth - which
+    goes through the probe path - with another.
+    """
+    mac = (
+        fields.get("mac")
+        or fields.get("macEthernet")
+        or fields.get("macWifi")
+    )
+    if not mac:
+        return None
+    if ":" not in mac and "-" not in mac and len(mac) == 12:
+        mac = ":".join(mac[i:i + 2] for i in range(0, 12, 2))
+    return mac
 
 
 def get_default_cert_paths(hass: HomeAssistant) -> tuple[str, str]:
@@ -93,8 +133,20 @@ async def validate_connection(
     brand: str = "his",
 ) -> dict[str, Any]:
     """Validate we can connect to the TV."""
-    # Use provided MAC or generate a random one for dynamic auth
-    mac = mac_address or generate_random_mac()
+    # Dynamic-auth credentials are derived from the MAC; the TV recomputes the
+    # same hash from its own real MAC, so a random one is never accepted past
+    # the initial CONNACK. Resolve the TV's real MAC via a UPnP probe before
+    # falling back to a random one (which will just fail).
+    mac = mac_address
+    if not mac:
+        try:
+            device = await hass.async_add_executor_job(probe_ip, host)
+            if device and device.mac:
+                mac = device.mac
+        except Exception as err:  # noqa: BLE001 - best effort, falls back below
+            _LOGGER.debug("Could not probe MAC for %s: %s", host, err)
+    mac_resolved = mac is not None
+    mac = mac or generate_random_mac()
 
     tv = AsyncVidaaTV(
         host=host,
@@ -123,17 +175,25 @@ async def validate_connection(
             "model": None,
             "device_id": None,
             "sw_version": None,
+            # The TV's real MAC, if this call managed to resolve one, so the
+            # flow can reuse it instead of probing the TV a second time.
+            # None when we fell back to a random MAC.
+            "mac": mac if mac_resolved else None,
         }
 
         if device_info:
             result["name"] = device_info.get("tv_name", DEFAULT_NAME)
             result["model"] = device_info.get("model_name")
+            # async_get_tv_info returns Optional[dict], so it must be guarded.
+            # No host fallback: device_id becomes the entry unique_id and the
+            # device registry identifier, and an IP churns on DHCP renewal.
+            # The entities already fall back to entry_id when it is None.
             result["device_id"] = (
-                tv_info.get("deviceid")
+                (tv_info or {}).get("deviceid")
+                or device_info.get("network_type")
                 or device_info.get("wifi_mac")
                 or device_info.get("mac")
-                or self._host
-                )
+            )
             result["sw_version"] = device_info.get("tv_version")
 
         if tv_info:
@@ -161,17 +221,37 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._port: int = DEFAULT_PORT
         self._name: str = DEFAULT_NAME
         self._device_id: str | None = None
-        self._mac: str = generate_random_mac()  # Random MAC for dynamic auth
+        self._mac: str = generate_random_mac()  # Placeholder until resolved
+        self._mac_resolved: bool = False  # True once _mac is a real hw MAC
         self._model: str | None = None
         self._brand: str | None = None
         self._sw_version: str | None = None
-        self._discovery_info: ssdp.SsdpServiceInfo | None = None
+        self._discovery_info: SsdpServiceInfo | None = None
         self._certfile: str | None = None
         self._keyfile: str | None = None
         # The connected client that triggered the PIN dialog. The TV ties the
         # pairing session to this one MQTT connection, so authenticate() must
         # run on it - reconnecting with a fresh client loses the session.
         self._pairing_tv: AsyncVidaaTV | None = None
+
+    def _remember_mac(self, mac: str | None) -> None:
+        """Record a real hardware MAC resolved from the TV.
+
+        Once resolved, later steps skip their own UPnP probe - each probe tries
+        both candidate UPnP ports with a 3s timeout apiece, so re-probing costs
+        seconds of config-flow latency against a slow or half-awake TV.
+        """
+        if mac and not self._mac_resolved:
+            self._mac = mac
+            self._mac_resolved = True
+
+    def _apply_validation_result(self, info: dict[str, Any]) -> None:
+        """Copy the fields validate_connection resolved onto the flow."""
+        self._name = info.get("name") or self._name
+        self._device_id = info.get("device_id")
+        self._model = info.get("model")
+        self._sw_version = info.get("sw_version")
+        self._remember_mac(info.get("mac"))
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -222,11 +302,9 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         self._port,
                         certfile=self._certfile,
                         keyfile=self._keyfile,
+                        mac_address=self._mac if self._mac_resolved else None,
                     )
-                    self._name = info.get("name", DEFAULT_NAME)
-                    self._device_id = info.get("device_id")
-                    self._model = info.get("model")
-                    self._sw_version = info.get("sw_version")
+                    self._apply_validation_result(info)
 
                     # Set unique ID if we got device_id
                     if self._device_id:
@@ -255,11 +333,9 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         self._port,
                         certfile=self._certfile,
                         keyfile=self._keyfile,
+                        mac_address=self._mac if self._mac_resolved else None,
                     )
-                    self._name = info.get("name", DEFAULT_NAME)
-                    self._device_id = info.get("device_id")
-                    self._model = info.get("model")
-                    self._sw_version = info.get("sw_version")
+                    self._apply_validation_result(info)
 
                     if self._device_id:
                         await self.async_set_unique_id(self._device_id)
@@ -293,29 +369,27 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_ssdp(
-        self, discovery_info: ssdp.SsdpServiceInfo
+        self, discovery_info: SsdpServiceInfo
     ) -> FlowResult:
         """Handle SSDP discovery."""
         _LOGGER.debug("SSDP discovery: %s", discovery_info)
 
         # Check for vidaa_support=1 in modelDescription to filter non-Hisense devices
-        model_desc = discovery_info.upnp.get("modelDescription", "")
-        vidaa_support = False
-        for line in model_desc.split('\n'):
-            if '=' in line:
-                key, _, value = line.partition('=')
-                key = key.strip()
-                value = value.strip()
-                if key == 'vidaa_support' and value == '1':
-                    vidaa_support = True
-                elif key == 'brand' and value:
-                    # brand is an auth input (part of client_id/credentials)
-                    self._brand = value
+        fields = parse_model_description(discovery_info.upnp.get("modelDescription"))
 
-        if not vidaa_support:
+        if fields.get("vidaa_support") != "1":
             _LOGGER.debug("SSDP device does not have vidaa_support=1, ignoring: %s",
                          discovery_info.ssdp_headers.get("_host"))
             return self.async_abort(reason="not_vidaa_tv")
+
+        # brand is an auth input (part of client_id/credentials)
+        if fields.get("brand"):
+            self._brand = fields["brand"]
+
+        # The SSDP descriptor already carries the TV's real MAC - grab it so
+        # dynamic-auth credentials match what the TV itself will compute, and
+        # so the pairing step doesn't have to probe the TV for it.
+        self._remember_mac(mac_from_descriptor(fields))
 
         # Extract host from discovery
         self._host = discovery_info.ssdp_headers.get("_host") or discovery_info.ssdp_location
@@ -359,12 +433,10 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._port,
                 certfile=self._certfile,
                 keyfile=self._keyfile,
+                mac_address=self._mac if self._mac_resolved else None,
                 brand=self._brand or "his",
             )
-            self._name = info.get("name", self._name)
-            self._device_id = info.get("device_id")
-            self._model = info.get("model")
-            self._sw_version = info.get("sw_version")
+            self._apply_validation_result(info)
 
             if self._device_id:
                 await self.async_set_unique_id(self._device_id)
@@ -399,7 +471,8 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._certfile = entry_data.get(CONF_CERTFILE)
         self._keyfile = entry_data.get(CONF_KEYFILE)
         self._device_id = entry_data.get(CONF_DEVICE_ID)
-        self._mac = generate_random_mac()  # New MAC for new auth
+        self._mac = generate_random_mac()  # Placeholder; resolved before pairing
+        self._mac_resolved = False
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
@@ -541,18 +614,47 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # this when there's no live pairing session - i.e. on first entry or
         # after a failed attempt that needs a fresh PIN.
         if self._pairing_tv is None:
-            # brand is an auth input. SSDP discovery already captured it from
-            # the descriptor; for the manual entry path, probe the TV's UPnP
-            # descriptor before connecting.
-            if not self._brand and self._host:
+            # brand and MAC are both auth inputs. SSDP discovery already
+            # captured them from the descriptor; for the manual entry path,
+            # probe the TV's UPnP descriptor before connecting. The MAC in
+            # particular matters: dynamic-auth credentials are a hash of it,
+            # and the TV recomputes that hash with its own real MAC, so a
+            # random placeholder is silently dropped right after CONNACK.
+            if (not self._brand or not self._mac_resolved) and self._host:
                 try:
                     device = await self.hass.async_add_executor_job(
                         probe_ip, self._host
                     )
-                    if device and device.brand:
+                    # Don't let the probe overwrite a brand SSDP already gave
+                    # us: this block now also runs purely to resolve the MAC,
+                    # and brand is an auth input - clobbering a discovered
+                    # "tpv" with the probe's value breaks pairing outright.
+                    if device and device.brand and not self._brand:
                         self._brand = device.brand
+                    if device:
+                        self._remember_mac(device.mac)
                 except Exception as err:  # noqa: BLE001 - best effort, falls back to "his"
-                    _LOGGER.debug("Could not probe brand for %s: %s", self._host, err)
+                    _LOGGER.debug("Could not probe brand/MAC for %s: %s", self._host, err)
+
+            if not self._mac_resolved:
+                _LOGGER.warning(
+                    "Could not resolve %s's real MAC address; falling back to a "
+                    "random one for dynamic auth. The TV will likely reject this "
+                    "past the initial connect.",
+                    self._host,
+                )
+
+            # Clear any stale saved token for this host before pairing fresh -
+            # a leftover token (from an earlier interrupted attempt, or from
+            # before a TV firmware/pairing reset) makes the client try to
+            # reconnect/refresh with credentials the TV no longer honours
+            # instead of generating new ones, and start_pairing() never runs.
+            try:
+                await self.hass.async_add_executor_job(
+                    delete_token, None, self._host, self._port
+                )
+            except Exception as err:  # noqa: BLE001 - best effort
+                _LOGGER.debug("Could not clear stale token for %s: %s", self._host, err)
 
             tv = AsyncVidaaTV(
                 host=self._host,
@@ -626,7 +728,9 @@ class VidaaTVOptionsFlow(config_entries.OptionsFlow):
 
         current_interval = self.config_entry.options.get("scan_interval", SCAN_INTERVAL)
         # WoL target: previously-set option, else the TV's real hardware MAC
-        # (device_id). Not CONF_MAC, which is the random dynamic-auth MAC.
+        # (device_id). Deliberately not CONF_MAC: for entries paired before the
+        # MAC is resolved from the TV's descriptor it still holds a random
+        # dynamic-auth MAC, and nothing on the entry distinguishes the two.
         current_wol_mac = self.config_entry.options.get(
             "wol_mac", self.config_entry.data.get(CONF_DEVICE_ID, "")
         )
