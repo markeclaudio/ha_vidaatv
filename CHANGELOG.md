@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Wi-Fi also has to be supported and enabled on the TV).
 - Older TVs no longer retry a pointless token refresh on every poll. They issue
   no token at all, so the log filled with "No refresh token available".
+- **An already-configured TV was offered again as a new discovery.** Once a TV
+  has been paired its entry adopts the TV's own device id, which no longer
+  matches the identifier an SSDP announcement carries — so every scan re-offered
+  it, and each of those discoveries also opened a connection to a TV the
+  integration was already connected to. Discovered TVs are now matched against
+  existing entries by address and MAC, which also stops a TV that changed IP
+  from being added twice.
 
 ### Changed
 

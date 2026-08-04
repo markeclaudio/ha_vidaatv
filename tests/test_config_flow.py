@@ -27,6 +27,7 @@ from custom_components.vidaa_tv.const import (
     CONF_CERTFILE,
     CONF_DEVICE_ID,
     CONF_KEYFILE,
+    CONF_HW_MAC,
     CONF_MAC,
     CONF_MAC_ETHERNET,
     CONF_MAC_WIFI,
@@ -938,3 +939,94 @@ async def test_options_form_copes_with_no_known_macs(
     result = await hass.config_entries.options.async_init(entry.entry_id)
 
     assert "None found yet" in result["description_placeholders"]["known_macs"]
+
+
+async def test_ssdp_ignores_a_tv_that_is_already_paired(
+    hass: HomeAssistant,
+    mock_config_flow_tv: MagicMock,
+    mock_certs_exist: MagicMock,
+) -> None:
+    """An already-set-up TV must not be offered again on every scan.
+
+    Regression: the entry adopts the TV's device_id as its unique_id once the
+    TV answers getdeviceinfo, so it no longer matches the SSDP USN a discovery
+    arrives with. The TV was re-offered on every scan, and each discovery also
+    ran validate_connection - opening a second connection to a TV that the
+    coordinator already had one to.
+    """
+    entry = create_mock_config_entry(hass)
+    entry.add_to_hass(hass)
+    assert entry.unique_id != "test-usn-uuid"  # the mismatch that caused this
+
+    discovery_info = _create_ssdp_discovery_info(
+        usn="uuid:test-usn-uuid::urn:schemas-upnp-org:device:MediaRenderer:1"
+    )
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_SSDP},
+        data=discovery_info,
+    )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    # And it must not have touched the TV to work that out.
+    mock_config_flow_tv.async_connect.assert_not_called()
+
+
+async def test_ssdp_recognises_a_paired_tv_that_changed_ip(
+    hass: HomeAssistant,
+    mock_config_flow_tv: MagicMock,
+    mock_certs_exist: MagicMock,
+) -> None:
+    """A DHCP renewal must not produce a duplicate entry."""
+    data = dict(MOCK_CONFIG_ENTRY_DATA)
+    data[CONF_HOST] = "192.168.1.99"  # old address
+    data[CONF_HW_MAC] = "00:11:22:33:44:55"
+
+    entry = create_mock_config_entry(hass, data=data)
+    entry.add_to_hass(hass)
+
+    # Same TV (descriptor MAC matches), new IP.
+    discovery_info = _create_ssdp_discovery_info(
+        model_description="vidaa_support=1\nmac=001122334455",
+    )
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_SSDP},
+        data=discovery_info,
+    )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+
+
+async def test_ssdp_still_offers_a_genuinely_new_tv(
+    hass: HomeAssistant,
+    mock_config_flow_tv: MagicMock,
+    mock_certs_exist: MagicMock,
+) -> None:
+    """The dedupe must not swallow a second, different TV."""
+    data = dict(MOCK_CONFIG_ENTRY_DATA)
+    data[CONF_HOST] = "192.168.1.99"
+    data[CONF_HW_MAC] = "aa:bb:cc:dd:ee:ff"
+    data[CONF_DEVICE_ID] = "aabbccddeeff"  # device_id is the TV's MAC too
+
+    entry = create_mock_config_entry(
+        hass, data=data, entry_id="other_tv", unique_id="aabbccddeeff"
+    )
+    entry.add_to_hass(hass)
+
+    discovery_info = _create_ssdp_discovery_info(
+        model_description="vidaa_support=1\nmac=001122334455",
+    )
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_SSDP},
+        data=discovery_info,
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "confirm"

@@ -64,6 +64,21 @@ def generate_random_mac() -> str:
     """Generate a random MAC address."""
     return ":".join(f"{random.randint(0, 255):02x}" for _ in range(6))
 
+
+def _normalize_mac(mac: str | None) -> str | None:
+    """Reduce a MAC to bare lowercase hex, or None if it is not one.
+
+    Entries store MACs in whichever form their source used - colon-separated
+    from a descriptor, flat from getdeviceinfo - so they have to be compared in
+    a single form.
+    """
+    if not mac:
+        return None
+    flat = mac.replace(":", "").replace("-", "").lower()
+    if len(flat) == 12 and all(c in "0123456789abcdef" for c in flat):
+        return flat
+    return None
+
 # Import library
 import sys
 from pathlib import Path
@@ -295,6 +310,31 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         self.hass.async_create_task(_close())
 
+    @callback
+    def _async_already_configured(self, host: str, mac: str | None) -> bool:
+        """Whether an existing entry is already this TV.
+
+        Matches on host first, then on the hardware MAC so a TV that moved to a
+        new IP is still recognised. Deliberately does not use the entry's
+        unique_id: that becomes the TV's device_id after pairing, which no
+        longer resembles the SSDP USN a discovery arrives with.
+        """
+        wanted_mac = _normalize_mac(mac)
+
+        for entry in self._async_current_entries(include_ignore=True):
+            if entry.data.get(CONF_HOST) == host:
+                return True
+            if not wanted_mac:
+                continue
+            known = {
+                _normalize_mac(entry.data.get(key))
+                for key in (CONF_HW_MAC, CONF_MAC_ETHERNET, CONF_MAC_WIFI, CONF_DEVICE_ID)
+            }
+            if wanted_mac in known - {None}:
+                return True
+
+        return False
+
     def _remember_mac(self, mac: str | None) -> None:
         """Record a real hardware MAC resolved from the TV.
 
@@ -482,6 +522,15 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         self._discovery_info = discovery_info
         self._name = discovery_info.upnp.get("friendlyName", DEFAULT_NAME)
+
+        # Bail out early if this TV is already set up. The unique_id check below
+        # is not enough on its own: an entry adopts the TV's device_id as its
+        # unique_id once the TV answers getdeviceinfo, so the SSDP USN no longer
+        # matches it and the TV gets offered again on every scan - each time
+        # also running validate_connection, which opens another connection to a
+        # TV that is already connected.
+        if self._async_already_configured(self._host, self._mac if self._mac_resolved else None):
+            return self.async_abort(reason="already_configured")
 
         # Try to get unique ID from USN
         usn = discovery_info.ssdp_usn
