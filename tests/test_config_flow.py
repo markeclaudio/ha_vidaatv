@@ -7,10 +7,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from homeassistant import config_entries
-from homeassistant.components import ssdp
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
 
 from custom_components.vidaa_tv.config_flow import (
     CannotConnect,
@@ -298,9 +298,9 @@ def _create_ssdp_discovery_info(
     model_description: str = "vidaa_support=1\nmodel=H55A6500",
     usn: str = "uuid:001122334455::urn:schemas-upnp-org:device:MediaRenderer:1",
     location: str | None = None,
-) -> ssdp.SsdpServiceInfo:
+) -> SsdpServiceInfo:
     """Create a mock SSDP discovery info."""
-    return ssdp.SsdpServiceInfo(
+    return SsdpServiceInfo(
         ssdp_usn=usn,
         ssdp_st="urn:schemas-upnp-org:device:MediaRenderer:1",
         ssdp_location=location or f"http://{host}:38400/MediaServer/rendererdevicedesc.xml",
@@ -393,7 +393,7 @@ async def test_ssdp_discovery_no_host(
     hass: HomeAssistant,
 ) -> None:
     """Test SSDP discovery with no host."""
-    discovery_info = ssdp.SsdpServiceInfo(
+    discovery_info = SsdpServiceInfo(
         ssdp_usn="uuid:001122334455::urn:schemas-upnp-org:device:MediaRenderer:1",
         ssdp_st="urn:schemas-upnp-org:device:MediaRenderer:1",
         ssdp_location=None,
@@ -445,7 +445,7 @@ async def test_ssdp_discovery_extracts_host_from_url(
 ) -> None:
     """Test SSDP discovery extracts host from URL location."""
     # Create discovery info with URL in location instead of _host
-    discovery_info = ssdp.SsdpServiceInfo(
+    discovery_info = SsdpServiceInfo(
         ssdp_usn="uuid:aabbccdd1122::urn:schemas-upnp-org:device:MediaRenderer:1",
         ssdp_st="urn:schemas-upnp-org:device:MediaRenderer:1",
         ssdp_location="http://192.168.1.200:38400/MediaServer/rendererdevicedesc.xml",

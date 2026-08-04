@@ -13,7 +13,6 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.components import ssdp
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
@@ -26,6 +25,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
+from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
 
 from .const import (
     DOMAIN,
@@ -195,7 +195,7 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._model: str | None = None
         self._brand: str | None = None
         self._sw_version: str | None = None
-        self._discovery_info: ssdp.SsdpServiceInfo | None = None
+        self._discovery_info: SsdpServiceInfo | None = None
         self._certfile: str | None = None
         self._keyfile: str | None = None
         # The connected client that triggered the PIN dialog. The TV ties the
@@ -325,7 +325,7 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_ssdp(
-        self, discovery_info: ssdp.SsdpServiceInfo
+        self, discovery_info: SsdpServiceInfo
     ) -> FlowResult:
         """Handle SSDP discovery."""
         _LOGGER.debug("SSDP discovery: %s", discovery_info)
@@ -593,7 +593,11 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     device = await self.hass.async_add_executor_job(
                         probe_ip, self._host
                     )
-                    if device and device.brand:
+                    # Don't let the probe overwrite a brand SSDP already gave
+                    # us: this block now also runs purely to resolve the MAC,
+                    # and brand is an auth input - clobbering a discovered
+                    # "tpv" with the probe's value breaks pairing outright.
+                    if device and device.brand and not self._brand:
                         self._brand = device.brand
                     if device and device.mac and not self._mac_resolved:
                         self._mac = device.mac
