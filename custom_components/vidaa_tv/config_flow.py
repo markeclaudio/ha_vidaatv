@@ -402,6 +402,14 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._use_ssl = user_input.get(CONF_USE_SSL, DEFAULT_USE_SSL)
             self._auth_mode = user_input.get(CONF_AUTH_MODE) or DEFAULT_AUTH_MODE
 
+            # Plain MQTT only ever pairs with the fixed static login: "auto"
+            # probes a protocol version the plain broker never serves and then
+            # falls back to dynamic, which it rejects, and plain dynamic (PIN)
+            # TVs do not exist. So plain implies static - the user can just turn
+            # SSL off and leave auth on "Auto" without also picking "Static".
+            if not self._use_ssl and self._auth_mode == AUTH_MODE_AUTO:
+                self._auth_mode = AUTH_MODE_STATIC
+
             # Plain-MQTT TVs need no client certificates - skip the file check
             # and connect unencrypted. Otherwise require the cert/key pair for
             # the mutual-TLS handshake the encrypted broker expects.

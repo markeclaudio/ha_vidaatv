@@ -19,7 +19,7 @@
           "auth_mode": "Authentication mode"
         },
         "data_description": {
-          "use_ssl": "Leave on for the usual encrypted connection. Turn off only if setup fails to connect and your TV runs older firmware that speaks plain MQTT - then the certificate paths below are ignored.",
+          "use_ssl": "Leave on for the usual encrypted connection. Turn off only if setup fails to connect and your TV runs older firmware that speaks plain MQTT - then the certificate paths below are ignored and the static login is used automatically.",
           "auth_mode": "How credentials are generated. \"Auto\" detects your TV's protocol version and falls back if the TV rejects it. Choose \"Static\" if your TV runs older firmware and setup fails with a not-authorized error; \"Dynamic\" forces the newer scheme."
         }
       },
