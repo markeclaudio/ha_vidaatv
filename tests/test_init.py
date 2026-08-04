@@ -20,6 +20,8 @@ from custom_components.vidaa_tv.const import (
     CONF_AUTH_MODE,
     CONF_DEVICE_ID,
     CONF_HW_MAC,
+    CONF_MAC_ETHERNET,
+    CONF_MAC_WIFI,
     DOMAIN,
 )
 
@@ -296,3 +298,35 @@ async def test_changing_options_still_reloads(
         await hass.async_block_till_done()
 
     assert entry.runtime_data.options_snapshot == {"scan_interval": 60}
+
+
+async def test_device_page_shows_both_interface_macs(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """Both MACs must be visible, since only one of them can be woken.
+
+    Wake-on-LAN reaches only the interface the TV is actually connected on,
+    and the TV does not say which - so the owner needs to see both to pick.
+    """
+    from homeassistant.helpers import device_registry as dr
+
+    data = dict(MOCK_CONFIG_ENTRY_DATA)
+    data[CONF_HW_MAC] = "a0:62:fb:66:77:ca"
+    data[CONF_MAC_ETHERNET] = "a0:62:fb:66:77:ca"
+    data[CONF_MAC_WIFI] = "f0:35:75:29:5a:e0"
+
+    entry = create_mock_config_entry(hass, data=data)
+    entry.add_to_hass(hass)
+
+    with patch("custom_components.vidaa_tv.AsyncVidaaTV", return_value=mock_vidaa_tv):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    registry = dr.async_get(hass)
+    device = registry.async_get_device(identifiers={(DOMAIN, "001122334455")})
+    assert device is not None
+
+    macs = {value for kind, value in device.connections if kind == dr.CONNECTION_NETWORK_MAC}
+    assert "a0:62:fb:66:77:ca" in macs
+    assert "f0:35:75:29:5a:e0" in macs

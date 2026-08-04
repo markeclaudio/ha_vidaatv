@@ -40,9 +40,13 @@ def mock_hw_mac_probe() -> Generator[MagicMock, None, None]:
     It runs as a background task on any entry without a stored MAC and does a
     real UPnP probe, which the test suite rightly blocks as network access.
     """
+    device = MagicMock(
+        mac="00:11:22:33:44:55",
+        mac_ethernet="00:11:22:33:44:55",
+        mac_wifi="66:55:44:33:22:11",
+    )
     with patch(
-        "custom_components.vidaa_tv.probe_ip",
-        return_value=MagicMock(mac="00:11:22:33:44:55"),
+        "custom_components.vidaa_tv.probe_ip", return_value=device
     ) as mock_probe:
         yield mock_probe
 
@@ -187,6 +191,9 @@ def mock_config_flow_tv() -> Generator[MagicMock, None, None]:
     probe_device = MagicMock()
     probe_device.brand = "his"
     probe_device.mac = "00:11:22:33:44:55"
+    # Real values, not mocks: these land in entry.data, which HA serializes.
+    probe_device.mac_ethernet = "00:11:22:33:44:55"
+    probe_device.mac_wifi = "66:55:44:33:22:11"
     with patch(
         "custom_components.vidaa_tv.config_flow.AsyncVidaaTV", autospec=True
     ) as mock_class, patch(

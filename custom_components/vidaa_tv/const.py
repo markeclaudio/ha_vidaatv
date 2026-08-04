@@ -12,6 +12,11 @@ CONF_MAC: Final = "mac"
 # Distinct from CONF_MAC, which for dynamic auth may hold a random placeholder
 # used to build a client_id - sending Wake-on-LAN to that would do nothing.
 CONF_HW_MAC: Final = "hw_mac"
+# Per-interface MACs. The descriptor does not say which interface the TV is
+# actually connected on, and Wake-on-LAN only works against that one, so both
+# are surfaced for the user to choose between.
+CONF_MAC_ETHERNET: Final = "mac_ethernet"
+CONF_MAC_WIFI: Final = "mac_wifi"
 CONF_NAME: Final = "name"
 CONF_DEVICE_ID: Final = "device_id"
 CONF_MODEL: Final = "model"

@@ -28,6 +28,8 @@ from custom_components.vidaa_tv.const import (
     CONF_DEVICE_ID,
     CONF_KEYFILE,
     CONF_MAC,
+    CONF_MAC_ETHERNET,
+    CONF_MAC_WIFI,
     DEFAULT_PORT,
     DOMAIN,
 )
@@ -148,7 +150,12 @@ async def test_pair_flow_persists_discovered_brand(
     mock_config_flow_tv  # AsyncVidaaTV mock is active via fixture
     with patch(
         "custom_components.vidaa_tv.config_flow.probe_ip",
-        return_value=MagicMock(brand="tpv", mac="00:11:22:33:44:55"),
+        return_value=MagicMock(
+            brand="tpv",
+            mac="00:11:22:33:44:55",
+            mac_ethernet="00:11:22:33:44:55",
+            mac_wifi="66:55:44:33:22:11",
+        ),
     ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
@@ -510,7 +517,12 @@ async def test_validate_connection_device_id_resolution(
     """device_id resolution tolerates a missing tv_info and never uses the IP."""
     from custom_components.vidaa_tv.config_flow import validate_connection
 
-    probe_device = MagicMock(brand="his", mac="00:11:22:33:44:55")
+    probe_device = MagicMock(
+        brand="his",
+        mac="00:11:22:33:44:55",
+        mac_ethernet="00:11:22:33:44:55",
+        mac_wifi="66:55:44:33:22:11",
+    )
     with patch(
         "custom_components.vidaa_tv.config_flow.AsyncVidaaTV", autospec=True
     ) as mock_class, patch(
@@ -664,7 +676,9 @@ async def test_ssdp_brand_survives_a_mac_resolving_probe(
 
     with patch(
         "custom_components.vidaa_tv.config_flow.probe_ip",
-        return_value=MagicMock(brand="his", mac=None),
+        return_value=MagicMock(
+            brand="his", mac=None, mac_ethernet=None, mac_wifi=None
+        ),
     ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
@@ -808,7 +822,12 @@ async def test_auto_auth_mode_still_probes_and_uses_dynamic(
     """The default must keep behaving as before for modern TVs."""
     from custom_components.vidaa_tv.config_flow import validate_connection
 
-    probe_device = MagicMock(brand="his", mac="00:11:22:33:44:55")
+    probe_device = MagicMock(
+        brand="his",
+        mac="00:11:22:33:44:55",
+        mac_ethernet="00:11:22:33:44:55",
+        mac_wifi="66:55:44:33:22:11",
+    )
     with patch(
         "custom_components.vidaa_tv.config_flow.AsyncVidaaTV", autospec=True
     ) as mock_class, patch(
@@ -887,3 +906,35 @@ async def test_entries_without_an_auth_mode_default_to_auto(
     schema = result["data_schema"].schema
     auth_key = next(k for k in schema if k == CONF_AUTH_MODE)
     assert auth_key.default() == AUTH_MODE_AUTO
+
+
+async def test_options_form_lists_the_tvs_mac_addresses(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """The wol_mac field is where the choice is made, so show both there."""
+    data = dict(MOCK_CONFIG_ENTRY_DATA)
+    data[CONF_MAC_ETHERNET] = "a0:62:fb:66:77:ca"
+    data[CONF_MAC_WIFI] = "f0:35:75:29:5a:e0"
+
+    entry = create_mock_config_entry(hass, data=data)
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    shown = result["description_placeholders"]["known_macs"]
+    assert "Ethernet: a0:62:fb:66:77:ca" in shown
+    assert "Wi-Fi: f0:35:75:29:5a:e0" in shown
+
+
+async def test_options_form_copes_with_no_known_macs(
+    hass: HomeAssistant,
+    mock_vidaa_tv: MagicMock,
+) -> None:
+    """A TV that has never been reachable has none stored yet."""
+    entry = create_mock_config_entry(hass)
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    assert "None found yet" in result["description_placeholders"]["known_macs"]

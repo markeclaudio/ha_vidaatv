@@ -58,7 +58,7 @@
     "step": {
       "init": {
         "title": "Vidaa TV Options",
-        "description": "Configure options for your Vidaa TV.",
+        "description": "Configure options for your Vidaa TV.\n\n**MAC addresses reported by this TV**  \n{known_macs}",
         "data": {
           "scan_interval": "Polling interval",
           "wol_mac": "Wake-on-LAN MAC address",
@@ -66,7 +66,7 @@
         },
         "data_description": {
           "scan_interval": "How often to poll the TV for state updates (in seconds).",
-          "wol_mac": "MAC address to use for Wake-on-LAN. Leave empty to use the default.",
+          "wol_mac": "MAC address to send the Wake-on-LAN packet to when turning the TV on. Leave empty to use the default. A magic packet only reaches the interface the TV is actually connected on, so if turning the TV on does not work, try the other address listed above. The TV must also have Wake-on-LAN enabled in its network settings.",
           "auth_mode": "How credentials are generated. \"Auto\" detects your TV's protocol version and falls back if the TV rejects it. Choose \"Static\" if your TV runs older firmware and setup fails with a not-authorized error; \"Dynamic\" forces the newer scheme."
         }
       }

@@ -20,6 +20,9 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     DOMAIN,
     CONF_DEVICE_ID,
+    CONF_HW_MAC,
+    CONF_MAC_ETHERNET,
+    CONF_MAC_WIFI,
     CONF_MODEL,
     CONF_SW_VERSION,
     DEFAULT_NAME,
@@ -98,8 +101,21 @@ class VidaaTVMediaPlayer(CoordinatorEntity[VidaaTVDataUpdateCoordinator], MediaP
             sw_version=data.get("sw_version") or self._entry.data.get(CONF_SW_VERSION),
         )
 
-        if mac:
-            info["connections"] = {(CONNECTION_NETWORK_MAC, mac)}
+        # Every MAC we know of, so the device page shows them: the user needs
+        # them to pick a Wake-on-LAN target when the default one is not the
+        # interface the TV is actually connected on.
+        connections = {
+            (CONNECTION_NETWORK_MAC, value)
+            for value in (
+                mac,
+                self._entry.data.get(CONF_HW_MAC),
+                self._entry.data.get(CONF_MAC_ETHERNET),
+                self._entry.data.get(CONF_MAC_WIFI),
+            )
+            if value
+        }
+        if connections:
+            info["connections"] = connections
         if data.get("ip"):
             info["configuration_url"] = f"http://{data['ip']}"
 

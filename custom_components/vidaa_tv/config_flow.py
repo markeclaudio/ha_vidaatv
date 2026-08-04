@@ -36,6 +36,8 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_HW_MAC,
     CONF_MAC,
+    CONF_MAC_ETHERNET,
+    CONF_MAC_WIFI,
     CONF_MODEL,
     CONF_BRAND,
     CONF_SW_VERSION,
@@ -160,13 +162,13 @@ async def validate_connection(
     # accepted past the initial CONNACK. Static auth derives nothing from it,
     # but Wake-on-LAN still needs it to turn the TV back on, so probe either way.
     mac = mac_address
-    if not mac:
-        try:
-            device = await hass.async_add_executor_job(probe_ip, host)
-            if device and device.mac:
-                mac = device.mac
-        except Exception as err:  # noqa: BLE001 - best effort, falls back below
-            _LOGGER.debug("Could not probe MAC for %s: %s", host, err)
+    probed = None
+    try:
+        probed = await hass.async_add_executor_job(probe_ip, host)
+        if not mac and probed and probed.mac:
+            mac = probed.mac
+    except Exception as err:  # noqa: BLE001 - best effort, falls back below
+        _LOGGER.debug("Could not probe MAC for %s: %s", host, err)
     mac_resolved = mac is not None
     if not mac_resolved and auth_mode != AUTH_MODE_STATIC:
         # Dynamic auth cannot build a client_id without one. A random MAC will
@@ -207,6 +209,10 @@ async def validate_connection(
             # The scheme that actually connected. Persisting it means later
             # connects skip the methods this TV already rejected.
             "auth_mode": tv.auth_mode or auth_mode,
+            # Both interfaces, so the user can pick the right Wake-on-LAN
+            # target if the TV is not on the one we defaulted to.
+            "mac_ethernet": probed.mac_ethernet if probed else None,
+            "mac_wifi": probed.mac_wifi if probed else None,
         }
 
         if device_info:
@@ -258,6 +264,8 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._certfile: str | None = None
         self._keyfile: str | None = None
         self._auth_mode: str = DEFAULT_AUTH_MODE
+        self._mac_ethernet: str | None = None
+        self._mac_wifi: str | None = None
         # The connected client that triggered the PIN dialog. The TV ties the
         # pairing session to this one MQTT connection, so authenticate() must
         # run on it - reconnecting with a fresh client loses the session.
@@ -305,6 +313,8 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._model = info.get("model")
         self._sw_version = info.get("sw_version")
         self._remember_mac(info.get("mac"))
+        self._mac_ethernet = info.get("mac_ethernet") or self._mac_ethernet
+        self._mac_wifi = info.get("mac_wifi") or self._mac_wifi
         # Pin "auto" down to whatever actually connected, so pairing and every
         # later connect go straight to it.
         if info.get("auth_mode"):
@@ -628,6 +638,8 @@ class VidaaTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         # Only when it really came from the TV: Wake-on-LAN
                         # aimed at a random placeholder wakes nothing.
                         CONF_HW_MAC: self._mac if self._mac_resolved else None,
+                        CONF_MAC_ETHERNET: self._mac_ethernet,
+                        CONF_MAC_WIFI: self._mac_wifi,
                         CONF_MODEL: self._model,
                         CONF_BRAND: self._brand or "his",
                         CONF_SW_VERSION: self._sw_version,
@@ -838,8 +850,26 @@ class VidaaTVOptionsFlow(config_entries.OptionsFlow):
             self.config_entry.data.get(CONF_AUTH_MODE) or DEFAULT_AUTH_MODE,
         )
 
+        # Wake-on-LAN only reaches the interface the TV is actually connected
+        # on, and the TV does not say which that is - so show both and let the
+        # user try the other one.
+        known_macs = []
+        for label, key in (
+            ("Ethernet", CONF_MAC_ETHERNET),
+            ("Wi-Fi", CONF_MAC_WIFI),
+        ):
+            value = self.config_entry.data.get(key)
+            if value:
+                known_macs.append(f"{label}: {value}")
+        macs_text = (
+            "  \n".join(known_macs)
+            if known_macs
+            else "None found yet - the TV reports them only while it is reachable."
+        )
+
         return self.async_show_form(
             step_id="init",
+            description_placeholders={"known_macs": macs_text},
             data_schema=vol.Schema(
                 {
                     vol.Optional(

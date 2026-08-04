@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.1.2]
 
+### Added
+
+- The TV's Ethernet and Wi-Fi MAC addresses are now shown on its device page,
+  and listed above the **wol_mac** field in the integration options. A
+  Wake-on-LAN packet only reaches the interface the TV is actually connected
+  on, and the TV does not report which that is — so if turning the TV on does
+  not work, set **wol_mac** to the other address.
+
 ### Fixed
 
 - **The TV could be turned off from Home Assistant but not back on.** Turning a

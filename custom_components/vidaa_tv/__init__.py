@@ -27,6 +27,8 @@ from .const import (
     CONF_CERTFILE,
     CONF_HW_MAC,
     CONF_KEYFILE,
+    CONF_MAC_ETHERNET,
+    CONF_MAC_WIFI,
     DEFAULT_AUTH_MODE,
     DEFAULT_PORT,
     PLATFORMS,
@@ -149,9 +151,18 @@ async def _async_backfill_hw_mac(hass: HomeAssistant, entry: VidaaTVConfigEntry)
     if not device or not device.mac:
         return
 
-    _LOGGER.debug("Storing hardware MAC %s for Wake-on-LAN", device.mac)
+    _LOGGER.debug(
+        "Storing MACs for Wake-on-LAN: %s (ethernet %s, wifi %s)",
+        device.mac, device.mac_ethernet, device.mac_wifi,
+    )
     hass.config_entries.async_update_entry(
-        entry, data={**entry.data, CONF_HW_MAC: device.mac}
+        entry,
+        data={
+            **entry.data,
+            CONF_HW_MAC: device.mac,
+            CONF_MAC_ETHERNET: device.mac_ethernet,
+            CONF_MAC_WIFI: device.mac_wifi,
+        },
     )
 
 
