@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 (Library/protocol changes are tracked separately in the [`pyvidaa`](https://github.com/warrenrees/pyvidaa) repository.)
 
+## [2.0.5]
+
+### Fixed
+
+- Pairing now uses the TV's real MAC address instead of a freshly generated random one.
+  Dynamic-auth credentials are a hash derived from the client's MAC, and the TV recomputes
+  that hash from its own hardware MAC to validate the connection — so a random MAC could
+  never match. The TV accepted the initial connection and then silently dropped the session
+  before the PIN reached the screen, which surfaced as "The TV did not respond" with nothing
+  in the log to explain it. The MAC is now read from the SSDP descriptor when the TV was
+  discovered, or from a UPnP probe on manual IP entry.
+- A leftover authentication token for the host is cleared before a fresh pairing attempt.
+  A token from an earlier interrupted attempt (or from before a TV factory reset) made the
+  client try to reconnect with credentials the TV no longer honours instead of generating
+  new ones, so the PIN prompt never appeared.
+- A TV reporting both a wired and a wireless MAC now resolves to the same address whether it
+  was found by discovery or by probing. Previously the two paths could pick different
+  interfaces, so a TV paired via discovery would fail to re-authenticate later.
+- The brand read from the SSDP descriptor is no longer overwritten while resolving the MAC.
+  Brand is part of the authentication credentials, so on non-Hisense VIDAA sets (e.g. `tpv`)
+  this produced credentials the TV rejected.
+- Setting up a TV no longer fails with a generic "cannot connect" when the TV answers
+  `getdeviceinfo` but not `gettvinfo`. The device ID also no longer falls back to the TV's IP
+  address, which became the entry's unique ID and changed whenever DHCP reassigned the address.
+
+### Changed
+
+- The config flow probes the TV's UPnP descriptor once per setup instead of twice, which
+  removes several seconds of delay when a TV is slow to answer or half asleep.
+
+Thanks to @aidinmaxim for diagnosing and reporting the dynamic-auth MAC failure (#6).
+
+## [2.0.4]
+
+### Fixed
+
+- Pairing holds a single connection open across showing the PIN and authenticating it. The TV
+  binds the pairing session to that one connection, so authenticating on a fresh connection
+  timed out.
+- Device info is fetched on a token-authenticated reconnect after pairing succeeds, since the
+  TV only serves `getdeviceinfo` on a token-authed session. This is what populates the model
+  and firmware version on the newly created device.
+
 ## [2.0.3]
 
 ### Fixed
